@@ -2,19 +2,23 @@
 resource : https://github.com/opencv/opencv/blob/3.4/samples/python/tutorial_code/video/optical_flow/optical_flow.py
 """
 
+from cProfile import label
+from itertools import count
 from cv2 import waitKey
+from matplotlib.pyplot import plot
 import numpy as np
 import cv2 as cv
 import argparse
-import keyboard
 import imutils
+import matplotlib.pyplot as plt
+import pandas as pd
 
-NumOfDot = 5
+NumOfDot = 30
 Wid = 960
-ratio = 9/16
+# ratio = 9/16
 # count = 0
 
-Hei = Wid*ratio
+# Hei = Wid*ratio
 
 np.set_printoptions(threshold=np.inf)
 
@@ -33,7 +37,8 @@ if not cap.isOpened():
 # params for ShiTomasi corner detection
 feature_params = dict( maxCorners = NumOfDot,
                        qualityLevel = 0.3,
-                       minDistance = 7,
+                       minDistance = 30,
+                    #    minDistance = 7,
                        blockSize = 7 )
 
 # Parameters for lucas kanade optical flow
@@ -41,17 +46,6 @@ lk_params = dict( winSize  = (15, 15),
                   maxLevel = 2,
                   criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
 
-# Detection Bound
-bounds = dict(
-    outerL= int(Wid*0.1),
-    outerU= int(Hei*0.1),
-    outerR= int(Wid*0.9),
-    outerD= int(Hei*0.9),
-    innerL= int(Wid*0.4),
-    innerU= int(Hei*0.4),
-    innerR= int(Wid*0.6),
-    innerD= int(Hei*0.6),
-)
 
 # Create some random colors
 color = np.random.randint(0, 255, (NumOfDot, 3))
@@ -84,20 +78,37 @@ class Line:
         self.start = np.array(np.multiply(start, [1, -1])) 
         self.stop = np.array(np.multiply(stop, [1, -1]))
         self.vector = np.subtract(self.stop, self.start)
-        self.length = np.linalg.norm(self.vector)
+        self.length = np.round(np.linalg.norm(self.vector), 2)
         self.angle = angle_between(self.vector, [1, 0])
         # print(str(self.angle) + '°')
 
     def get_info(self):
-        print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(self.vector) + '\t\t' + str(self.length) + '\t\t' + str(self.angle))
+        print(str(self.length) + '\t\t' + str(self.angle))
+        # print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(self.vector) + '\t\t' + str(self.length) + '\t\t' + str(self.angle))
 
 
 # Take first frame and find corners in it
 def Run():
     ret, old_frame = cap.read()
+    ratio = cap.get(cv.CAP_PROP_FRAME_HEIGHT)/cap.get(cv.CAP_PROP_FRAME_WIDTH)
+    Hei = Wid*ratio
 
-    old_frame = imutils.resize(old_frame, width=int(Wid))    
+    old_frame = imutils.resize(old_frame, width=int(Wid))
+    # print(cap.get(cv.CAP_PROP_FRAME_HEIGHT), cap.get(cv.CAP_PROP_FRAME_WIDTH))
+    # print(Hei, Wid)
     
+    # Detection Bound
+    bounds = dict(
+        outerL= int(Wid*0.1),
+        outerU= int(Hei*0.6),
+        outerR= int(Wid*0.9),
+        outerD= int(Hei*0.75),
+        innerL= int(Wid*0.45),
+        innerU= int(Hei*0.55),
+        innerR= int(Wid*0.55),
+        innerD= int(Hei*0.55),
+    )
+
     # cut a mask
     adj_old_frame = np.zeros(((bounds["outerD"]-bounds["outerU"]), (bounds["outerR"]-bounds["outerL"]), 3), dtype=np.uint8)
 
@@ -114,13 +125,15 @@ def Run():
     # Create a mask image for drawing purposes
     draw_mask = np.zeros_like(old_frame)
     lines = []
+    lengths = []
+    count = 0
 
     while(1):
         ret, frame = cap.read()
         if not ret:
             print('No frames grabbed!')
             cv.destroyAllWindows()
-            exit()
+            # exit()
             break
 
         frame = imutils.resize(frame, width=int(Wid))
@@ -152,27 +165,86 @@ def Run():
             frame = cv.circle(frame, (int(a+bounds["outerL"]), int(b+bounds["outerU"])), 5, color[i].tolist(), -1)
             new_line = Line([c, d], [a, b])
             lines.append(new_line)
+            lengths.append(lines[-1].length)
 
         frame = cv.rectangle(frame, (bounds["outerL"], bounds["outerU"]), (bounds["outerR"], bounds["outerD"]), (0, 200, 0), 3)
         frame = cv.rectangle(frame, (bounds["innerL"], bounds["innerU"]), (bounds["innerR"], bounds["innerD"]), (0, 0, 200), 3)
         img = cv.add(frame, draw_mask)
         
         cv.imshow('frame', img)
-        for ele in lines:
-            ele.get_info()
+        # for ele in lines:
+        #     ele.get_info()
 
-        k = waitKey(0)
-        # k = cv.waitKey(30) & 0xff
+        # k = waitKey(0)
+        k = cv.waitKey(30) & 0xff
         if k == 27:
             cv.destroyAllWindows()
-            exit()
+            # exit()
             break
 
         # Now update the previous frame and previous points
+        
         old_gray = frame_gray.copy()
         p0 = good_new.reshape(-1, 1, 2)
+        count += 1
 
-        if (len(p1) < NumOfDot/4) :
-            p0 = cv.goodFeaturesToTrack(old_gray, mask = None, **feature_params)
+        # if p1 is None or (len(p1) < NumOfDot/2) :
+        if count >= 30:
+            # print(count)
+            count = 0
+            new = cv.goodFeaturesToTrack(old_gray, mask = None, **feature_params)
+            # print(new.shape, new)
+            # print(p0.shape, p0)
+            p0 = np.append(p0, new).reshape(-1, 1, 2)
+            # print(p0.shape, p0)
+            if (len(p0)>NumOfDot) :
+                p0 = p0[-NumOfDot:]
+    
+    # d = []
+    # for id, ele in enumerate(lines):
+    #     d.append(
+    #         {
+    #             "time" : id,
+    #             "length" : ele.length,
+    #             "angle" : ele.angle
+    #         }
+
+    #     )
+    # d = {}
+
+    plt.title("Optical Flow Length Distribution")
+    plt.xlabel("time")
+    plt.ylabel("length of optical flow")
+    plt.scatter(range(len(lengths)), lengths)
+    # fig, (ax1, ax2) = plt.subplots(1, 2)
+    # for id, ele in enumerate(lines):
+    #     if (ele.length < 20):
+    #         plt.scatter(id, ele.length, s=1)
+        # if ele.length in d:
+        #     d[ele.length] += 1
+        # else:
+        #     d[ele.length] = 1
+    plt.show()
+
+    # print(lengths)
+
+    plt.title("Optical Flow Length Frequency")
+    plt.hist(lengths, label="frequency", bins=100)
+    plt.xlabel("length of optical flow")
+    plt.ylabel("frequency")
+    plt.show()
+
+    # for k in sorted(d):
+    #     ax2.scatter(k, d[k])
+
+    #     if (ele.angle < 90):
+    #         ax1.scatter(id, ele.length, s=1, color='r')
+    #     elif (ele.angle < 180):
+    #         ax1.scatter(id, ele.length, s=1, color='y')
+    #     elif (ele.angle < 270):
+    #         ax1.scatter(id, ele.length, s=1, color='g')
+    #     else:
+    #         ax1.scatter(id, ele.length, s=1, color='b')
+
 
 Run()
