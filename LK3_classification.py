@@ -6,6 +6,7 @@ from cProfile import label
 from itertools import count
 from turtle import st
 from cv2 import waitKey
+from matplotlib.colors import same_color
 from matplotlib.pyplot import draw, gray, plot
 import numpy as np
 import cv2 as cv
@@ -13,6 +14,7 @@ import argparse
 import imutils
 import matplotlib.pyplot as plt
 import pandas as pd
+import pickle
 
 NumOfDot = 30
 Wid = 960
@@ -83,19 +85,66 @@ class Line:
 def checkInside(pt, mask = [], st = []):
     status = []
     for id in range(len(pt)):
-        if st[id,0] == 0:
+        if st[id,0] == 0 or round(pt[id,0,1])>mask.shape[0] or round(pt[id,0,0])>mask.shape[1] :
             status.append([0])
         else:
+            # print(st[id,0], round(pt[id,0,1]), round(pt[id,0,0]))
             status.append([mask[round(pt[id,0,1]), round(pt[id,0,0])] > 0])
     return np.array(status)
 
-def process_img(frame, mask):
+def modify_contrast_and_brightness2(img, brightness=0 , contrast=100):
+    # 上面做法的問題：有做到對比增強，白的的確更白了。
+    # 但沒有實現「黑的更黑」的效果
+    import math
+
+    # brightness = 0
+    # contrast = 150 # - 減少對比度/+ 增加對比度
+
+    B = brightness / 255.0
+    c = contrast / 255.0 
+    k = math.tan((45 + 44 * c) / 180 * math.pi)
+
+    img = (img - 127.5 * (1 - B)) * k + 127.5 * (1 + B)
+
+    # 所有值必須介於 0~255 之間，超過255 = 255，小於 0 = 0
+    img = np.clip(img, 0, 255).astype(np.uint8)
+    return img
+    # print("減少對比度 (白黑都接近灰，分不清楚): ")
+    # show_img(img)
+
+def save_object(obj, filename):
+    with open(filename, 'wb') as outp:  # Overwrites any existing file.
+        pickle.dump(obj, outp, pickle.HIGHEST_PROTOCOL)
+
+def process_img(frame, mask, border):
     test = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+    # print(test[0])
+    # print(np.mean(test))
+    # print(np.std(test))
+    # test = np.float32(test)
+    # test = (test - np.mean(test))/np.std(test)
+    # test = test / 255
+    # print(test[0])
+    # test = test * (255/4) + (255/2)
+    # print(test[0])
+    # test = modify_contrast_and_brightness2(test)
+    # test = np.clip(test, 0, 255)
+    # test = np.uint8(test)
+    # print(np.mean(test))
+    # print(np.std(test))
+    # print(test[30])
+    # waitKey(0)
     # test = np.bitwise_and(test, mask)
+    # avg_shi = np.round(np.mean(test[mask]), 2)
+    # avg_shi = np.round(np.mean(test[border:]), 2)
+    # print("\t\t" + str(avg_shi))
+    # avg_shi = min(max(50, avg_shi), 100)
+
     # test = cv.GaussianBlur(test, (3, 3), 0)
-    # test = cv.threshold(test, 150, 255, cv.THRESH_BINARY)[1]
-    # test = cv.erode(test, None, iterations=2)
-    # test = cv.dilate(test, None, iterations=4)
+    test = cv.threshold(test, np.mean(test) + np.std(test)*1.4, 255, cv.THRESH_BINARY)[1]
+    # kernel = np.ones((3,3), np.uint8)
+    test = cv.erode(test, None, iterations=1)
+    # test = cv.dilate(test, None, iterations=1)
     return test
     
 # Take first frame and find corners in it
@@ -107,13 +156,13 @@ def Run():
     
     # Detection Bound
     bounds = dict(
-        outerL= int(Wid*0.1),
+        outerL= int(Wid*0.2),
         outerU= int(Hei*0.65),
-        outerR= int(Wid*0.9),
+        outerR= int(Wid*0.8),
         outerD= int(Hei*0.85),
-        innerL= int(Wid*0.3),
+        innerL= int(Wid*0.35),
         innerU= int(Hei*0.65),
-        innerR= int(Wid*0.7),
+        innerR= int(Wid*0.65),
         innerD= int(Hei*0.65),
     )
 
@@ -135,7 +184,7 @@ def Run():
     waitKey(0)
 
     # old_gray = cv.cvtColor(old_frame, cv.COLOR_BGR2GRAY)
-    processed_old_frame = process_img(old_frame, mask)
+    processed_old_frame = process_img(old_frame, mask, bounds["innerU"])
     
     # p0 = cv.goodFeaturesToTrack(old_gray, mask = mask, **feature_params)
     p0 = cv.goodFeaturesToTrack(processed_old_frame, mask = mask, **feature_params)
@@ -155,17 +204,16 @@ def Run():
             break
 
         frame = imutils.resize(frame, width=int(Wid))
-        processed_frame = process_img(frame, mask)
+        processed_frame = process_img(frame, mask, bounds["innerU"])
         # frame_gray = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
 
         # print(processed_old_frame.shape, processed_frame.shape)
         # calculate optical flow
         # p1, st, err = cv.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
         p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, processed_frame, p0, None, **lk_params)
-
+        # print(processed_old_frame.shape, processed_frame.shape)
         # Select good points
         if p1 is not None:
-            # print(p1[,0,0])
             filter = checkInside(p1, mask, st)
             st[~filter] = 0
             good_new = p1[st==1]
@@ -185,8 +233,9 @@ def Run():
             lengths.append(lines[-1].length)
 
         frame = cv.polylines(frame, [mask_points], True, (0, 0, 200), 3)
-        processed_frame = cv.polylines(processed_frame, [mask_points], True, (0, 0, 200), 3)
-                                                
+        # processed_frame = cv.polylines(processed_frame, [mask_points], True, (0, 0, 200), 3)
+        
+
         img = cv.add(frame, draw_mask)
         cv.imshow('frame', img)
 
@@ -202,8 +251,15 @@ def Run():
             cv.destroyAllWindows()
             break
         elif k == 32:
-            while ((waitKey(0) & 0xff) != 32):
-                pass
+            while (1):
+                k2 = cv.waitKey(0) & 0xff
+                if k2 == 27:
+                    cv.destroyAllWindows()
+                    break
+                elif k2 == 112:
+                    print(processed_frame[0])
+                elif k2 == 32:
+                    break
         elif k == 8:
             draw_mask = np.zeros_like(old_frame)
 
@@ -221,18 +277,19 @@ def Run():
             new = cv.goodFeaturesToTrack(processed_old_frame, mask = mask, **feature_params)
             # new = cv.goodFeaturesToTrack(old_gray, mask = mask, **feature_params)
             if new is None:
-                print("\t\t+ 0")
+                print("\t+ 0")
                 continue
             
-            print("\t\t+", str(len(new)))
+            print("\t+", str(len(new)))
             # p0 = new.reshape(-1, 1, 2)
             p0 = np.append(p0, new).reshape(-1, 1, 2)
             if (len(p0) > NumOfDot) :
-                print("\t\t-", str(len(p0) - NumOfDot))
+                print("\t-", str(len(p0) - NumOfDot))
                 p0 = p0[-NumOfDot:]
 
         count += 1
     
+    save_object(lines, './line_segments.pkl')
 
     plt.title("Optical Flow Length Distribution")
     plt.xlabel("time")
