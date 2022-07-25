@@ -111,10 +111,10 @@ def Run():
         outerU= int(Hei*0.6),
         outerR= int(Wid*0.9),
         outerD= int(Hei*0.75),
-        innerL= int(Wid*0.45),
-        innerU= int(Hei*0.55),
-        innerR= int(Wid*0.55),
-        innerD= int(Hei*0.55),
+        innerL= int(Wid*0.4),
+        innerU= int(Hei*0.58),
+        innerR= int(Wid*0.6),
+        innerD= int(Hei*0.6),
     )
     
     # cut a mask
@@ -207,7 +207,7 @@ def Run():
             c, d = old.ravel()
             # print((a, b), (c, d))
             draw_mask = cv.line(draw_mask, (int(a), int(b)), (int(c), int(d)), color[i].tolist(), 2)
-            frame = cv.circle(frame, (int(a), int(b)), 5, color[i].tolist(), -1)
+            frame = cv.circle(frame, (int(a), int(b)), 8, color[i].tolist(), -1)
             # draw_mask = cv.line(draw_mask, (int(a+bounds["outerL"]), int(b+bounds["outerU"])), (int(c+bounds["outerL"]), int(d+bounds["outerU"])), color[i].tolist(), 2)
             # frame = cv.circle(frame, (int(a+bounds["outerL"]), int(b+bounds["outerU"])), 5, color[i].tolist(), -1)
 
@@ -221,8 +221,7 @@ def Run():
                                                 [bounds["outerR"], bounds["outerD"]], 
                                                 [bounds["outerR"], bounds["outerU"]], 
                                                 [bounds["innerR"], bounds["innerU"]], 
-                                                [bounds["innerL"], bounds["innerU"]], 
-                                                [bounds["outerL"], bounds["outerU"]]])], False, (0, 0, 200), 3)
+                                                [bounds["innerL"], bounds["innerU"]]])], True, (0, 0, 200), 3)
         # frame = cv.rectangle(frame, (bounds["innerL"], bounds["innerU"]), (bounds["innerR"], bounds["innerD"]), (0, 0, 200), 3)
         img = cv.add(frame, draw_mask)
         
@@ -243,7 +242,7 @@ def Run():
         p0 = good_new.reshape(-1, 1, 2)
         # count += 1
         print(len(p0))
-        if len(p0) < NumOfDot/4 :
+        if len(p0) < NumOfDot/3 :
         # if count >= 30:
             # print(count)
             # count = 0
