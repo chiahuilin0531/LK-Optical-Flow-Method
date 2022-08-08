@@ -3,18 +3,18 @@ resource : https://github.com/opencv/opencv/blob/3.4/samples/python/tutorial_cod
 """
 
 from cProfile import label
-from itertools import count
+import csv
+import itertools
 from math import floor
-from turtle import st
+import sys
 from cv2 import waitKey
-from matplotlib.colors import same_color
-from matplotlib.pyplot import draw, gray, plot
+from matplotlib.pyplot import figure
 import numpy as np
 import cv2 as cv
 import argparse
 import imutils
 import matplotlib.pyplot as plt
-import pandas as pd
+# import pandas as pd
 import pickle
 
 NUMOFDOTS = 20
@@ -29,11 +29,15 @@ parser = argparse.ArgumentParser(description='This sample demonstrates Lucas-Kan
 parser.add_argument('image', type=str, help='path to image file')
 args = parser.parse_args()
 
+video_name = sys.argv[-1].split("\\")[-1].split(".")[0]
+
 cap = cv.VideoCapture(args.image)
 
 # Check success
 if not cap.isOpened():
     raise Exception("Could not open video device")
+
+figure(figsize=(12, 8), dpi=80)
 
 # params for ShiTomasi corner detection
 feature_params = dict( maxCorners = int(NUMOFDOTS/4),
@@ -254,7 +258,8 @@ def Run():
     draw_mask = np.zeros_like(old_frame)
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
     lines = []
-    lengths = []
+    # lengths = []
+    vps = []
     count = 0
 
     while(1):
@@ -272,6 +277,7 @@ def Run():
 
         good_new = []
         good_old = []
+        cur_lines = []
         
         if len(p0) != 0:
             p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, processed_frame, p0, None, **lk_params)
@@ -293,22 +299,26 @@ def Run():
                 c, d = old.ravel()
                 
                 new_line = Line([c, d], [a, b], color[i])
+                ##### temp condition #####
                 if (new_line.angle > 180 and new_line.length > 3):  
                     lines.append(new_line)
-                    lengths.append(lines[-1].length)
+                    cur_lines.append(new_line)
+                    # lengths.append(lines[-1].length)
                     all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), (floor(c), floor(d)), new_line.color.tolist(), 2)
-                    if (len(lines)>NUMOFDOTS//2):
-                        for line in lines[-NUMOFDOTS//2: -1]:
-                            if (new_line.start[0] > WID/2 and line.start[0] < WID/2 or
-                                new_line.start[0] < WID/2 and line.start[0] > WID/2):
-                                x, y = cross_point(np.concatenate([line.start, line.stop]), 
-                                                   np.concatenate([new_line.start, new_line.stop]))
-                                all_lines_frame = cv.circle(all_lines_frame, (int(x), int(y)), 4, [0, 255, 0], -1)
-                                frame = cv.circle(frame, (int(x), int(y)), 4, [0, 255, 0], -1)
-
 
                 draw_mask = cv.line(draw_mask, (int(a), int(b)), (int(c), int(d)), color[i].tolist(), 2)
                 frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
+
+                for pair in itertools.combinations(cur_lines, 2):
+                    l1, l2 = pair
+                    ##### temp condition #####
+                    # if (l1.stop[0] > WID/2 and l2.stop[0] < WID/2 or
+                    #     l1.stop[0] < WID/2 and l2.stop[0] > WID/2):
+                    x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
+                                        np.concatenate([l1.start, l1.stop]))
+                    vps.append((x, y))
+                    frame = cv.circle(frame, (int(x), int(y)), 6, [0, 255, 100], -1)
+                    all_lines_frame = cv.circle(all_lines_frame, (int(x), int(y)), 2, [0, 255, 100], -1)
 
         frame = cv.polylines(frame, [np.array([mask_points[1], mask_points[3], mask_points[5], mask_points[7]])], True, (0, 0, 200), 3)
         frame = cv.circle(frame, (int(WID/2), int(Hei/2)), 6, [0, 0, 255], -1)
@@ -332,7 +342,7 @@ def Run():
         # Now update the previous frame and previous points
         processed_old_frame = processed_frame.copy()
         # p0 = good_new.reshape(-1, 1, 2)
-        print(len(p0))
+        print("# points:", len(p0))
 
         if len(p0) < NUMOFDOTS*0.2 or count == 50:
         # if count == 50:
@@ -340,35 +350,28 @@ def Run():
             # if (count == 50): 
             count = 0
             new = cv.goodFeaturesToTrack(processed_old_frame, mask = mask, **feature_params)
-            # new = cv.goodFeaturesToTrack(old_gray, mask = mask, **feature_params)
             if new is None:
-                print("\t+ 0")
+                print("\t\t+ 0")
                 continue
             
-            print("\t+", str(len(new)))
+            print("\t\t+", str(len(new)))
             p0 = new.reshape(-1, 1, 2)
             # p0 = np.append(p0, new).reshape(-1, 1, 2)
-            # if (len(p0) > NumOfDot) :
-            #     print("\t-", str(len(p0) - NumOfDot))
-            #     p0 = p0[-NumOfDot:]
+            # if (len(p0) > NUMOFDOTS) :
+            #     print("\t\t-", str(len(p0) - NUMOFDOTS))
+            #     p0 = p0[-NUMOFDOTS:]
 
         count += 1
     
     save_object(lines, './line_segments.pkl')
 
-    # color2 = np.random.randint(0, 255, (len(lines), 3))
+    with open(f'./vps_{video_name}.csv', 'w', newline='') as f:
+        write = csv.writer(f)
+        write.writerow(["x", "y"])
+        write.writerows(vps)
 
     print("total lines: ", len(lines))
 
-    # cv.imshow('all_lines', all_lines_frame)
-    # cv.waitKey(0)
-
-    # for i, line in enumerate(lines[:-NUMOFDOTS]):
-    #     for j in range(1, NUMOFDOTS):
-    #         if (lines[j].start[0] > WID/2 and line.start[0] < WID/2 or
-    #             lines[j].start[0] < WID/2 and line.start[0] > WID/2):
-    #             x, y = cross_point(np.concatenate([line.start, line.stop]), np.concatenate([lines[j].start, lines[j].stop]))
-    #             all_lines_frame = cv.circle(all_lines_frame, (int(x), int(y)), 2, [255, 255, 0], -1)
     all_lines_frame = cv.circle(all_lines_frame, (int(WID/2), int(Hei/2)), 6, [0, 0, 255], -1)
 
     cv.imshow('all_lines', all_lines_frame)
@@ -401,41 +404,57 @@ def reject_outliers(data, m = 2.):
     return data[s<m]
 
 def data_statistic():
-    lines = read_object('./line_segments.pkl')
+    x=[]
+    y=[]
+
+    with open(f'vps_{video_name}.csv') as csvfile:
+        rows = csv.reader(csvfile)
+        next(rows, None)
+        for row in rows:
+            x.append(float(row[0]))
+            y.append(float(row[1]))
+    # print(x, y)
+    plt.title("VP distribution")
+    plt.xlabel("x")
+    plt.ylabel("y")
+    plt.scatter(x, y, 10)
+    plt.show()
+
+    # lines = read_object('./line_segments.pkl')
     # print(lines[0].length)
-    lens = np.array([ele.length for ele in lines])
-    lens_new = reject_outliers(lens, m=20.)
-    print(lens.shape)
-    print(lens_new.shape)
+    # lens = np.array([ele.length for ele in lines])
+    # lens_new = reject_outliers(lens, m=20.)
+    # print(lens.shape)
+    # print(lens_new.shape)
 
-    print(np.std(lens), np.mean(lens), np.median(lens))
-    print(np.std(lens_new), np.mean(lens_new), np.median(lens_new))
+    # print(np.std(lens), np.mean(lens), np.median(lens))
+    # print(np.std(lens_new), np.mean(lens_new), np.median(lens_new))
     
-    plt.title("Optical Flow Length Distribution")
-    plt.xlabel("time")
-    plt.ylabel("length of optical flow")
-    plt.scatter(range(len(lens)), lens, 3)
-    plt.show()
+    # plt.title("Optical Flow Length Distribution")
+    # plt.xlabel("time")
+    # plt.ylabel("length of optical flow")
+    # plt.scatter(range(len(lens)), lens, 3)
+    # plt.show()
     
-    plt.title("Optical Flow Length Distribution")
-    plt.xlabel("time")
-    plt.ylabel("length of optical flow")
-    plt.scatter(range(len(lens_new)), lens_new, 3)
-    plt.show()
+    # plt.title("Optical Flow Length Distribution")
+    # plt.xlabel("time")
+    # plt.ylabel("length of optical flow")
+    # plt.scatter(range(len(lens_new)), lens_new, 3)
+    # plt.show()
 
-    plt.title("Optical Flow Length Frequency")
-    plt.hist(lens, label="frequency", bins=100)
-    plt.xlabel("length of optical flow")
-    plt.ylabel("frequency")
-    plt.show()
+    # plt.title("Optical Flow Length Frequency")
+    # plt.hist(lens, label="frequency", bins=100)
+    # plt.xlabel("length of optical flow")
+    # plt.ylabel("frequency")
+    # plt.show()
 
-    plt.title("Optical Flow Length Frequency")
-    plt.hist(lens_new, label="frequency", bins=100)
-    plt.xlabel("length of optical flow")
-    plt.ylabel("frequency")
-    plt.show()
+    # plt.title("Optical Flow Length Frequency")
+    # plt.hist(lens_new, label="frequency", bins=100)
+    # plt.xlabel("length of optical flow")
+    # plt.ylabel("frequency")
+    # plt.show()
 
-# data_statistic()
+
 
 Run()
-# print(angle_between([3, -4], [1, 0]))
+data_statistic()
