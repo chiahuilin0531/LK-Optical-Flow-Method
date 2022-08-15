@@ -2,12 +2,13 @@
 resource : https://github.com/opencv/opencv/blob/3.4/samples/python/tutorial_code/video/optical_flow/optical_flow.py
 """
 
-from cProfile import label
+from cmath import nan, sqrt
 import csv
 import itertools
 from math import floor
 import sys
-from cv2 import waitKey
+import time
+# from cv2 import waitKey
 from matplotlib.pyplot import figure
 import numpy as np
 import cv2 as cv
@@ -17,9 +18,12 @@ import matplotlib.pyplot as plt
 # import pandas as pd
 import pickle
 
-NUMOFDOTS = 20
-WID = 960
-Hei = 540
+NUMOFDOTS = 20  # maximum pts at the same time
+WID = 860   # window width
+Hei = 540   # window height
+ANGDIF = 35 # angle difference of lines to construct cross pt (degree)
+VP_NUM = 1
+UPDATE_RATIO = 0.2
 
 np.set_printoptions(threshold=np.inf)
 
@@ -75,6 +79,34 @@ def angle_between(v1, v2):
 
     return angle
 
+class VP:
+    def __init__(self, isbest: bool, x=None, y=None) -> None:
+        self.isinit = not isbest
+        self.x = x
+        self.y = y
+        pass
+
+    def __sub__(self, other):
+        return np.array([self.x-other.x, self.y-other.y])
+
+    def set(self, x, y):
+        self.isinit = True
+        self.x = x
+        self.y = y
+        print("VP init")
+
+    def update(self, x, y):
+        self.x = self.x + x * UPDATE_RATIO
+        self.y = self.y + y * UPDATE_RATIO
+
+    def is_init(self) -> bool:
+        return self.isinit
+
+    def distance(self, other) -> float:
+        if (~self.isinit):
+            raise Exception("VP is not initialized")
+        return sqrt(pow(self.x - other.x, 2) + pow(self.y - other.y, 2))
+
 # Line Segment Class
 class Line:
     def __init__(self, start=[0, 0], stop=[0, 0], color=[0,0,0]):
@@ -116,6 +148,8 @@ def cross_point(line1, line2):  # 計算交點函數
         b2 = y3*1.0-x3*k2*1.0
     if k2 == None:
         x = x3
+    elif k1-k2 == 0:
+        return[nan, nan]
     else:
         x = (b2-b1)*1.0/(k1-k2)
     y = k1*x*1.0+b1*1.0
@@ -202,18 +236,18 @@ def Run():
     ret, old_frame = cap.read()
     ratio = cap.get(cv.CAP_PROP_FRAME_HEIGHT)/cap.get(cv.CAP_PROP_FRAME_WIDTH)
     global Hei
-    Hei = WID*ratio
-    old_frame = imutils.resize(old_frame, width=int(WID))
-    
+    Hei = int(WID*ratio)
+    old_frame = imutils.resize(old_frame, width=int(WID))     
+    center = (int(WID/2), int(Hei/2))
     # Detection Bound
     bounds = dict(
         outerL= int(WID*0.2),
         outerU= int(Hei*0.65),
         outerR= int(WID*0.8),
         outerD= int(Hei*0.8),
-        innerL= int(WID*0.45),
+        innerL= int(WID*0.47),
         innerU= int(Hei*0.65),
-        innerR= int(WID*0.55),
+        innerR= int(WID*0.52),
         innerD= int(Hei*0.65),
     )
 
@@ -231,8 +265,8 @@ def Run():
     mask = np.zeros(old_frame.shape[:2], dtype=np.uint8)
     mask = cv.fillPoly(mask, [np.array([mask_points[1], mask_points[3], mask_points[5], mask_points[7]])], 255)
                                         
-    cv.imshow('processed_frame', mask)
-    waitKey(200)
+    cv.imshow('frame', mask)
+    cv.waitKey(200)
 
     small_mask = []
     for i in range(4):
@@ -244,14 +278,16 @@ def Run():
     small_mask[3] = cv.fillPoly(small_mask[3], [np.array([mask_points[0], mask_points[6], mask_points[7], mask_points[8]])], 255)
 
     for i in range(4):
-        cv.imshow('processed_frame', small_mask[i])
-        waitKey(100)
+        cv.imshow('frame', small_mask[i])
+        cv.waitKey(100)
 
     processed_old_frame = process_img(old_frame, mask, bounds["innerU"])
 
     p0 = []
     for i in range(4):
-        p0.extend(cv.goodFeaturesToTrack(processed_old_frame, mask = small_mask[i], **feature_params))
+        new = cv.goodFeaturesToTrack(processed_old_frame, mask = small_mask[i], **feature_params)
+        if new is not None:
+            p0.extend(new)
     p0 = np.array(p0)
 
     # Create a mask image for drawing purposes
@@ -259,9 +295,13 @@ def Run():
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
     lines = []
     # lengths = []
-    vps = []
+    total_vps = []
+    best_vp = VP(isbest=True)
     count = 0
-
+    avg_len = 2.
+    prev_time = time.time()
+    cur_vps = []
+    vp_dist = []
     while(1):
         ret, frame = cap.read()
         if not ret:
@@ -269,21 +309,43 @@ def Run():
             cv.destroyAllWindows()
             # exit()
             break
-
+        
+        
         frame = imutils.resize(frame, width=int(WID))
         processed_frame = process_img(frame, mask, bounds["innerU"])
-        
-        # calculate optical flow
 
+        new_time = time.time()
+        fps = int(1/(new_time-prev_time))
+        prev_time = new_time
+        # cv.rectangle(frame, (8, 48), (108, 68), )
+        cv.putText(frame, "fps:"+str(fps), (10, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 4)
+        cv.putText(frame, "fps:"+str(fps), (10, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
+        frame = cv.polylines(frame, [np.array([mask_points[1], mask_points[3], 
+                                                mask_points[5], mask_points[7]])], 
+                                                True, (0, 0, 200), 3)
+        frame = cv.circle(frame, center, 6, [0, 0, 255], -1)
+        """
+        # src = np.float32([[0, Hei*0.85], [WID, Hei*0.85], [WID//3, Hei*0.6], [WID//3*2, Hei*0.6]])
+        # dst = np.float32([[WID*0.4, Hei], [WID*0.6, Hei], [0, 0], [WID, 0]])
+        # Mx = cv.getPerspectiveTransform(src, dst) # The transformation matrix
+        # Minv = cv.getPerspectiveTransform(dst, src) # Inverse transformation
+        # warped_img = cv.warpPerspective(frame, Mx, (WID, Hei))
+        # cv.imshow('Bird\'s Eye View', warped_img)
+
+        # cur_frame = np.zeros_like(processed_frame)
+        """
         good_new = []
         good_old = []
         cur_lines = []
         
         if len(p0) != 0:
-            p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, processed_frame, p0, None, **lk_params)
+            # calculate optical flow
+            p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, 
+                            processed_frame, p0, None, **lk_params)
             
             # Select good points
             if p1 is not None:
+                # Check if the line is still inside the mask
                 filter = checkInside(p1, mask, st)
                 st[~filter] = 0
                 good_new.extend(p1[st==1])
@@ -300,40 +362,95 @@ def Run():
                 
                 new_line = Line([c, d], [a, b], color[i])
                 ##### temp condition #####
-                if (new_line.angle > 180 and new_line.length > 3):  
-                    lines.append(new_line)
-                    cur_lines.append(new_line)
-                    # lengths.append(lines[-1].length)
-                    all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), (floor(c), floor(d)), new_line.color.tolist(), 2)
+                if (new_line.angle > 180 and new_line.length > 2.):  
+                    if (new_line.length > avg_len):
+                        # print("\t\t\t\t\taverage flow length", round(avg_len, 2))
+                        lines.append(new_line)
+                        cur_lines.append(new_line)
+                        # lengths.append(lines[-1].length)
+                        all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), (floor(c), floor(d)), new_line.color.tolist(), 2)
+                    avg_len = (avg_len+new_line.length*0.01)/1.01
 
+                # cur_frame = cv.line(cur_frame, (int(a), int(b)), (int(c), int(d)), 255, 1)
                 draw_mask = cv.line(draw_mask, (int(a), int(b)), (int(c), int(d)), color[i].tolist(), 2)
                 frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
 
-                for pair in itertools.combinations(cur_lines, 2):
-                    l1, l2 = pair
-                    ##### temp condition #####
-                    # if (l1.stop[0] > WID/2 and l2.stop[0] < WID/2 or
-                    #     l1.stop[0] < WID/2 and l2.stop[0] > WID/2):
+            # Find the VPs from the flow lines
+            for pair in itertools.combinations(cur_lines, 2):
+                l1, l2 = pair
+                angle_diff = abs(l1.angle - l2.angle)
+                if (angle_diff > ANGDIF and angle_diff < 360-ANGDIF):
+                    # print(l1.angle, l2.angle)
                     x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
                                         np.concatenate([l1.start, l1.stop]))
-                    vps.append((x, y))
-                    frame = cv.circle(frame, (int(x), int(y)), 6, [0, 255, 100], -1)
-                    all_lines_frame = cv.circle(all_lines_frame, (int(x), int(y)), 2, [0, 255, 100], -1)
+                    if x is nan or y is nan:
+                        continue
+                    # print(l1.start, (x, y))
+                    if y > l1.start[1] or y > l2.start[1]:
+                        continue
 
-        frame = cv.polylines(frame, [np.array([mask_points[1], mask_points[3], mask_points[5], mask_points[7]])], True, (0, 0, 200), 3)
-        frame = cv.circle(frame, (int(WID/2), int(Hei/2)), 6, [0, 0, 255], -1)
+                    # frame = cv.circle(frame, (int(x), int(y)), 6, [0, 255, 100], -1)
+                    draw_mask = cv.circle(draw_mask, 
+                                        (int(x), int(y)), 6, [0, 0, 100], -1)
+                                        
+                    new_vp = VP(False, x, y)
+                    total_vps.append((x, y))
+                    cur_vps.append(new_vp)
+                    # print(len(cur_vps))
+                    if (~best_vp.is_init() and len(cur_vps) == VP_NUM):
+                        sum = np.array([0., 0.])
+                        for vp in cur_vps:
+                            sum = sum + np.array([vp.x, vp.y])
+                        sum = sum/VP_NUM
+                        best_vp.set(sum[0], sum[1])
+
+                    elif (best_vp.is_init()):
+                        cur_vps.pop(0)
+                        sum = np.array([0., 0.])
+                        for vp in cur_vps:
+                            sum += new_vp - best_vp
+                        sum = sum/VP_NUM
+                        best_vp.update(sum[0], sum[1])
+
+                        # cur_frame = cv.circle(cur_frame, (int(x), int(y)), 3, 255, -1)
+        # print(best_vp.is_init())
+        if (best_vp.is_init()):
+            # print(int(best_vp.x), int(best_vp.y))
+            frame = cv.circle(frame, (int(best_vp.x), int(best_vp.y)), 6, [0, 255, 100], -1)
+            all_lines_frame = cv.circle(all_lines_frame, 
+                                (int(best_vp.x), int(best_vp.y)), 2, [0, 255, 100], -1)
+            """
+            # if(len(cur_vps) > 0):
+            #     print(vp_dist)
+            #     print(cur_vps)
+            #     vp_dist = np.array(vp_dist)
+            #     cur_vps = np.array(cur_vps)
+
+            #     std = np.std(vp_dist)*1
+            #     mean = np.mean(vp_dist)
+            #     filter = np.array([d<mean+std and d>mean+std for d in vp_dist])
+            #     cur_vps = cur_vps[filter]
+            #     print(cur_vps)
+            #     cv.waitKey(0)
+
+        # frame = cv.line(frame, (int(WID/2)+30, int(Hei/2)), (int(WID/2)+60, int(Hei/2)), [0, 0, 0], 4)
+
+        # cv.imshow('cur cross points', cur_frame)
+"""
         
         img = cv.add(frame, draw_mask)
         cv.imshow('frame', img)
 
-        processed_img = cv.add(cv.cvtColor(processed_frame, cv.COLOR_GRAY2BGR), draw_mask)
-        cv.imshow('processed_frame', processed_img)
+        # processed_img = cv.add(cv.cvtColor(processed_frame, cv.COLOR_GRAY2BGR), draw_mask)
+        # cv.imshow('processed_frame', processed_img)
+
         
-        k = cv.waitKey(20) & 0xff
+        k = cv.waitKey(10) & 0xff
         if k == 27:
             cv.destroyAllWindows()
             break
         elif k == 32:
+            # print(cur_frame)
             while (cv.waitKey(0) & 0xff != 32):
                 continue
         elif k == 8:
@@ -342,24 +459,33 @@ def Run():
         # Now update the previous frame and previous points
         processed_old_frame = processed_frame.copy()
         # p0 = good_new.reshape(-1, 1, 2)
-        print("# points:", len(p0))
-
-        if len(p0) < NUMOFDOTS*0.2 or count == 50:
+        # print("# points:", len(p0), ",\taverage flow len:", round(avg_len, 2))
+        
+        # when tracking points is too few 
+        if len(p0) < NUMOFDOTS*0.2 or count == 20:
         # if count == 50:
             # print("count = ", str(count))
             # if (count == 50): 
             count = 0
-            new = cv.goodFeaturesToTrack(processed_old_frame, mask = mask, **feature_params)
+            
+            new = []
+            for i in range(4):
+                result = cv.goodFeaturesToTrack(processed_old_frame, 
+                            mask = small_mask[i], **feature_params)
+                if result is not None:
+                    new.extend(result)
+            new = np.array(new, dtype=np.float32)
+            
             if new is None:
-                print("\t\t+ 0")
+                # print("\t\t+ 0")
                 continue
             
-            print("\t\t+", str(len(new)))
-            p0 = new.reshape(-1, 1, 2)
-            # p0 = np.append(p0, new).reshape(-1, 1, 2)
-            # if (len(p0) > NUMOFDOTS) :
-            #     print("\t\t-", str(len(p0) - NUMOFDOTS))
-            #     p0 = p0[-NUMOFDOTS:]
+            # print("\t\t+", str(len(new)))
+            # p0 = new.reshape(-1, 1, 2)
+            p0 = np.append(p0, new).reshape(-1, 1, 2).astype(np.float32)
+            if (len(p0) > NUMOFDOTS) :
+                # print("\t\t-", str(len(p0) - NUMOFDOTS))
+                p0 = p0[-NUMOFDOTS:]
 
         count += 1
     
@@ -368,11 +494,12 @@ def Run():
     with open(f'./vps_{video_name}.csv', 'w', newline='') as f:
         write = csv.writer(f)
         write.writerow(["x", "y"])
-        write.writerows(vps)
-
+        write.writerows(total_vps)
+    print('-'*30)
     print("total lines: ", len(lines))
 
-    all_lines_frame = cv.circle(all_lines_frame, (int(WID/2), int(Hei/2)), 6, [0, 0, 255], -1)
+    all_lines_frame = cv.circle(all_lines_frame, 
+                        (int(WID/2), int(Hei/2)), 6, [0, 0, 255], -1)
 
     cv.imshow('all_lines', all_lines_frame)
     while cv.waitKey(0) != 27:
@@ -381,7 +508,7 @@ def Run():
     cv.destroyAllWindows()
 
     cap.release()
-
+"""
     # plt.title("Optical Flow Length Distribution")
     # plt.xlabel("time")
     # plt.ylabel("length of optical flow")
@@ -393,7 +520,7 @@ def Run():
     # plt.xlabel("length of optical flow")
     # plt.ylabel("frequency")
     # plt.show()
-
+"""
 # end of Run()
 
 def reject_outliers(data, m = 2.):
@@ -418,8 +545,10 @@ def data_statistic():
     plt.xlabel("x")
     plt.ylabel("y")
     plt.scatter(x, y, 10)
+    plt.gca().invert_yaxis()
     plt.show()
 
+"""
     # lines = read_object('./line_segments.pkl')
     # print(lines[0].length)
     # lens = np.array([ele.length for ele in lines])
@@ -453,7 +582,7 @@ def data_statistic():
     # plt.xlabel("length of optical flow")
     # plt.ylabel("frequency")
     # plt.show()
-
+"""
 
 
 Run()
