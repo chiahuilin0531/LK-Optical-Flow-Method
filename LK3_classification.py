@@ -2,14 +2,15 @@
 resource : https://github.com/opencv/opencv/blob/3.4/samples/python/tutorial_code/video/optical_flow/optical_flow.py
 """
 
+from cProfile import label
 from cmath import nan, sqrt
+from copy import deepcopy
 import csv
 import itertools
 from math import floor
 import sys
 import time
 # from cv2 import waitKey
-from matplotlib.pyplot import figure
 import numpy as np
 import cv2 as cv
 import argparse
@@ -17,45 +18,45 @@ import imutils
 import matplotlib.pyplot as plt
 # import pandas as pd
 import pickle
+from scipy import stats
 
-NUMOFDOTS = 20  # maximum pts at the same time
-WID = 860   # window width
-Hei = 540   # window height
-ANGDIF = 35 # angle difference of lines to construct cross pt (degree)
-VP_NUM = 1
-UPDATE_RATIO = 0.2
+NUMOFDOTS = 20      # maximum pts at the same time
+WID = 860           # window width
+Hei = 540           # window height
+ANGDIF = 25         # max accepted angle difference of lines to construct cross pt (degree)
+VP_NUM = 15         # number of cross points considered to update the best VP per round
+UPDATE_RATE = 0.3   # update rate to the best VP
 
-np.set_printoptions(threshold=np.inf)
+def setup():
+    global cap, feature_params, lk_params, color, video_name
 
-parser = argparse.ArgumentParser(description='This sample demonstrates Lucas-Kanade Optical Flow calculation. \
-                                              The example file can be downloaded from: \
-                                              https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4')
-parser.add_argument('image', type=str, help='path to image file')
-args = parser.parse_args()
+    plt.figure(figsize=(12, 8), dpi=80)
+    np.set_printoptions(threshold=np.inf)
+    parser = argparse.ArgumentParser(description='This sample demonstrates Lucas-Kanade Optical Flow calculation. \
+                                                The example file can be downloaded from: \
+                                                https://www.bogotobogo.com/python/OpenCV_Python/images/mean_shift_tracking/slow_traffic_small.mp4')
+    parser.add_argument('image', type=str, help='path to image file')
+    args = parser.parse_args()
+    video_name = sys.argv[-1].split("\\")[-1].split(".")[0]
+    cap = cv.VideoCapture(args.image)
 
-video_name = sys.argv[-1].split("\\")[-1].split(".")[0]
+    # Check success
+    if not cap.isOpened():
+        raise Exception("Could not open video device")
 
-cap = cv.VideoCapture(args.image)
+    # params for ShiTomasi corner detection
+    feature_params = dict( maxCorners = int(NUMOFDOTS/4),
+                        qualityLevel = 0.3,
+                        minDistance = 7,
+                        blockSize = 7 )
 
-# Check success
-if not cap.isOpened():
-    raise Exception("Could not open video device")
+    # Parameters for lucas kanade optical flow
+    lk_params = dict( winSize  = (15, 15),
+                    maxLevel = 2,
+                    criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
 
-figure(figsize=(12, 8), dpi=80)
-
-# params for ShiTomasi corner detection
-feature_params = dict( maxCorners = int(NUMOFDOTS/4),
-                       qualityLevel = 0.3,
-                       minDistance = 7,
-                       blockSize = 7 )
-
-# Parameters for lucas kanade optical flow
-lk_params = dict( winSize  = (15, 15),
-                  maxLevel = 2,
-                  criteria = (cv.TERM_CRITERIA_EPS | cv.TERM_CRITERIA_COUNT, 10, 0.03))
-
-# Create some random colors
-color = np.random.randint(0, 255, (NUMOFDOTS, 3))
+    # Create some random colors
+    color = np.random.randint(0, 255, (NUMOFDOTS, 3))
 
 def unit_vector(vector):
     """ Returns the unit vector of the vector.  """
@@ -89,6 +90,9 @@ class VP:
     def __sub__(self, other):
         return np.array([self.x-other.x, self.y-other.y])
 
+    def __call__(self) -> tuple:
+        return (self.x, self.y)
+
     def set(self, x, y):
         self.isinit = True
         self.x = x
@@ -96,26 +100,55 @@ class VP:
         print("VP init")
 
     def update(self, x, y):
-        self.x = self.x + x * UPDATE_RATIO
-        self.y = self.y + y * UPDATE_RATIO
+        if (not self.isinit):
+            raise Exception("VP is not initialized")
+        self.x = self.x + x * UPDATE_RATE
+        self.y = self.y + y * UPDATE_RATE
 
     def is_init(self) -> bool:
         return self.isinit
 
-    def distance(self, other) -> float:
-        if (~self.isinit):
-            raise Exception("VP is not initialized")
-        return sqrt(pow(self.x - other.x, 2) + pow(self.y - other.y, 2))
+    def check_valid(self, best) -> bool:
+        return (np.absolute(self-best) < WID//15).all()
+
+class VL:
+    def __init__(self):
+        self.m = 0.0
+        self.mv = 100.0
+        self.isinit = False
+
+    def __call__(self):
+        if not self.isinit:
+            return None, None
+        return self.lp, self.rp, self.up, self.dp
+    
+    def update(self, vps: list, best_vp: VP):
+        self.isinit = True
+        self.mp = (best_vp.x, best_vp.y)
+        if len(vps) > 1:
+            x = [row.x for row in vps]
+            y = [row.y for row in vps]
+            slope, intercept, r, p, std_err = stats.linregress(x, y)
+            self.m = slope
+            slope, intercept, r, p, std_err = stats.linregress(y, x)
+            self.mv = 1/slope
+            
+        self.mp = (best_vp.x, best_vp.y)
+        self.lp = (0, self.mp[1] - self.mp[0]*self.m)
+        self.rp = (WID-1, self.mp[1] + (WID - 1 - self.mp[0])*self.m)
+        self.up = (0, self.mp[1] - self.mp[0]*self.mv)
+        self.dp = (WID-1, self.mp[1] + (WID - 1 - self.mp[0])*self.mv)
 
 # Line Segment Class
-class Line:
+class FlowLine:
     def __init__(self, start=[0, 0], stop=[0, 0], color=[0,0,0]):
         # print(start, stop)
         # self.start = np.array(np.multiply(start, [1, -1])+[0, Hei]) 
         # self.stop = np.array(np.multiply(stop, [1, -1]))
         self.start = np.array(start) 
         self.stop = np.array(stop)
-        self.vector = np.subtract(np.multiply(self.stop, [1, -1]), np.multiply(self.start, [1, -1]))    # xy座標平面
+        self.vector = np.subtract(np.multiply(self.stop, [1, -1]), 
+                                np.multiply(self.start, [1, -1]))    # xy座標平面
         self.length = np.round(np.linalg.norm(self.vector), 2)
         self.angle = angle_between(self.vector, [1, 0])     # xy座標平面
         self.color = color
@@ -123,8 +156,8 @@ class Line:
     def get_info(self):
         # print(self.start)
         # print(str(self.length) + '\t\t' + str(self.angle))
-        print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(np.concatenate([self.start, self.stop])))
         # print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(self.vector) + '\t\t' + str(self.length) + '\t\t' + str(self.angle))
+        print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(np.concatenate([self.start, self.stop])))
 
 def cross_point(line1, line2):  # 計算交點函數
     # print(line1, line2)
@@ -289,19 +322,24 @@ def Run():
         if new is not None:
             p0.extend(new)
     p0 = np.array(p0)
-
+    
     # Create a mask image for drawing purposes
     draw_mask = np.zeros_like(old_frame)
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
     lines = []
     # lengths = []
-    total_vps = []
+    vp_history = []
+    vp_history2 = []
     best_vp = VP(isbest=True)
+    vl = VL()
     count = 0
     avg_len = 2.
     prev_time = time.time()
-    cur_vps = []
-    vp_dist = []
+    last_update_round = 0
+    recent_cps = []
+    all_cps = []
+    show = False
+    
     while(1):
         ret, frame = cap.read()
         if not ret:
@@ -310,19 +348,18 @@ def Run():
             # exit()
             break
         
-        
         frame = imutils.resize(frame, width=int(WID))
         processed_frame = process_img(frame, mask, bounds["innerU"])
 
         new_time = time.time()
         fps = int(1/(new_time-prev_time))
         prev_time = new_time
-        # cv.rectangle(frame, (8, 48), (108, 68), )
+
         cv.putText(frame, "fps:"+str(fps), (10, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (200, 200, 200), 4)
         cv.putText(frame, "fps:"+str(fps), (10, 50), cv.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 2)
         frame = cv.polylines(frame, [np.array([mask_points[1], mask_points[3], 
                                                 mask_points[5], mask_points[7]])], 
-                                                True, (0, 0, 200), 3)
+                                                True, (0, 0, 100), 2)
         frame = cv.circle(frame, center, 6, [0, 0, 255], -1)
         """
         # src = np.float32([[0, Hei*0.85], [WID, Hei*0.85], [WID//3, Hei*0.6], [WID//3*2, Hei*0.6]])
@@ -344,8 +381,8 @@ def Run():
                             processed_frame, p0, None, **lk_params)
             
             # Select good points
+            # Check if the line is still inside the mask
             if p1 is not None:
-                # Check if the line is still inside the mask
                 filter = checkInside(p1, mask, st)
                 st[~filter] = 0
                 good_new.extend(p1[st==1])
@@ -359,115 +396,114 @@ def Run():
             for i, (new, old) in enumerate(zip(good_new, good_old)):
                 a, b = new.ravel()
                 c, d = old.ravel()
-                
-                new_line = Line([c, d], [a, b], color[i])
+                if a==c and b==d:
+                    continue
+                new_line = FlowLine([c, d], [a, b], color[i])
                 ##### temp condition #####
                 if (new_line.angle > 180 and new_line.length > 2.):  
                     if (new_line.length > avg_len):
                         # print("\t\t\t\t\taverage flow length", round(avg_len, 2))
                         lines.append(new_line)
                         cur_lines.append(new_line)
-                        # lengths.append(lines[-1].length)
                         all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), (floor(c), floor(d)), new_line.color.tolist(), 2)
                     avg_len = (avg_len+new_line.length*0.01)/1.01
 
-                # cur_frame = cv.line(cur_frame, (int(a), int(b)), (int(c), int(d)), 255, 1)
                 draw_mask = cv.line(draw_mask, (int(a), int(b)), (int(c), int(d)), color[i].tolist(), 2)
                 frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
 
-            # Find the VPs from the flow lines
+            # Find the cross points from the flow lines
             for pair in itertools.combinations(cur_lines, 2):
                 l1, l2 = pair
                 angle_diff = abs(l1.angle - l2.angle)
                 if (angle_diff > ANGDIF and angle_diff < 360-ANGDIF):
-                    # print(l1.angle, l2.angle)
                     x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
                                         np.concatenate([l1.start, l1.stop]))
                     if x is nan or y is nan:
                         continue
-                    # print(l1.start, (x, y))
                     if y > l1.start[1] or y > l2.start[1]:
                         continue
+                    new_cp = VP(False, x, y)
+                    recent_cps.append(new_cp)
+                    all_cps.append(new_cp)
 
-                    # frame = cv.circle(frame, (int(x), int(y)), 6, [0, 255, 100], -1)
-                    draw_mask = cv.circle(draw_mask, 
-                                        (int(x), int(y)), 6, [0, 0, 100], -1)
-                                        
-                    new_vp = VP(False, x, y)
-                    total_vps.append((x, y))
-                    cur_vps.append(new_vp)
-                    # print(len(cur_vps))
-                    if (~best_vp.is_init() and len(cur_vps) == VP_NUM):
+                    if (best_vp.is_init()):
+                        if not new_cp.check_valid(best_vp):
+                            recent_cps.pop()
+                            all_cps.pop()
+                            continue
+                        # draw_mask = cv.circle(draw_mask, 
+                        #                 (int(x), int(y)), 6, [0, 0, 100], -1)
+                        # del recent_cps[0]
                         sum = np.array([0., 0.])
-                        for vp in cur_vps:
+                        dif = []
+                        for vp in recent_cps[-VP_NUM:]:
+                            dif.append(vp - best_vp)
+
+                        mean = np.mean(dif, axis=0)
+                        std = np.std(dif, axis=0)
+                        c = 0
+                        for d in dif:
+                            if(np.less_equal(d, mean+std).all() and np.greater(d, mean-std).all()):
+                                sum = sum + d
+                                c = c+1
+                        # print("c=", c)
+                        if (c != 0):
+                            sum = sum/c
+                            best_vp.update(sum[0], sum[1])
+                            last_update_round = 0
+                            show = True
+
+                    elif (len(recent_cps) >= VP_NUM):
+                        sum = np.array([0., 0.])
+                        for vp in recent_cps:
                             sum = sum + np.array([vp.x, vp.y])
                         sum = sum/VP_NUM
                         best_vp.set(sum[0], sum[1])
+                        last_update_round = 0
+                        show = True
+                    
+            if show and last_update_round > 30 :
+                show = False
+                best_vp = VP(True)
+                recent_cps = []
+                print("hide")
 
-                    elif (best_vp.is_init()):
-                        cur_vps.pop(0)
-                        sum = np.array([0., 0.])
-                        for vp in cur_vps:
-                            sum += new_vp - best_vp
-                        sum = sum/VP_NUM
-                        best_vp.update(sum[0], sum[1])
 
-                        # cur_frame = cv.circle(cur_frame, (int(x), int(y)), 3, 255, -1)
-        # print(best_vp.is_init())
+        # show the best VP (Green)
         if (best_vp.is_init()):
-            # print(int(best_vp.x), int(best_vp.y))
+            vp_history.append((best_vp.x, best_vp.y))
+            vp_history2.append(deepcopy(best_vp))
+            vl.update(vp_history2, best_vp)
+            lp, rp, up, dp = vl()
+            frame = cv.line(frame, (int(lp[0]), int(lp[1])), (int(rp[0]), int(rp[1])), [0, 200, 50], 2)
+            frame = cv.line(frame, (int(up[0]), int(up[1])), (int(dp[0]), int(dp[1])), [0, 200, 50], 2)
             frame = cv.circle(frame, (int(best_vp.x), int(best_vp.y)), 6, [0, 255, 100], -1)
             all_lines_frame = cv.circle(all_lines_frame, 
                                 (int(best_vp.x), int(best_vp.y)), 2, [0, 255, 100], -1)
-            """
-            # if(len(cur_vps) > 0):
-            #     print(vp_dist)
-            #     print(cur_vps)
-            #     vp_dist = np.array(vp_dist)
-            #     cur_vps = np.array(cur_vps)
-
-            #     std = np.std(vp_dist)*1
-            #     mean = np.mean(vp_dist)
-            #     filter = np.array([d<mean+std and d>mean+std for d in vp_dist])
-            #     cur_vps = cur_vps[filter]
-            #     print(cur_vps)
-            #     cv.waitKey(0)
-
-        # frame = cv.line(frame, (int(WID/2)+30, int(Hei/2)), (int(WID/2)+60, int(Hei/2)), [0, 0, 0], 4)
-
-        # cv.imshow('cur cross points', cur_frame)
-"""
+            
+            plot_vp(vp_history2, all_cps, best_vp, vl, 0)
+            # plot_vp_rotate(vp_history2, all_cps, best_vp, vl, 0)
         
-        img = cv.add(frame, draw_mask)
-        cv.imshow('frame', img)
-
-        # processed_img = cv.add(cv.cvtColor(processed_frame, cv.COLOR_GRAY2BGR), draw_mask)
-        # cv.imshow('processed_frame', processed_img)
-
+        # img = cv.add(frame, draw_mask)
+        cv.imshow('frame', frame)
         
         k = cv.waitKey(10) & 0xff
         if k == 27:
             cv.destroyAllWindows()
+            plt.close()
             break
         elif k == 32:
-            # print(cur_frame)
             while (cv.waitKey(0) & 0xff != 32):
                 continue
         elif k == 8:
             draw_mask = np.zeros_like(old_frame)
 
-        # Now update the previous frame and previous points
+        # update the previous frame and previous points
         processed_old_frame = processed_frame.copy()
-        # p0 = good_new.reshape(-1, 1, 2)
-        # print("# points:", len(p0), ",\taverage flow len:", round(avg_len, 2))
         
-        # when tracking points is too few 
-        if len(p0) < NUMOFDOTS*0.2 or count == 20:
-        # if count == 50:
-            # print("count = ", str(count))
-            # if (count == 50): 
+        # when tracking points are not enough
+        if len(p0) < NUMOFDOTS*0.3 or count == 10:
             count = 0
-            
             new = []
             for i in range(4):
                 result = cv.goodFeaturesToTrack(processed_old_frame, 
@@ -479,22 +515,27 @@ def Run():
             if new is None:
                 # print("\t\t+ 0")
                 continue
-            
             # print("\t\t+", str(len(new)))
-            # p0 = new.reshape(-1, 1, 2)
-            p0 = np.append(p0, new).reshape(-1, 1, 2).astype(np.float32)
-            if (len(p0) > NUMOFDOTS) :
-                # print("\t\t-", str(len(p0) - NUMOFDOTS))
-                p0 = p0[-NUMOFDOTS:]
+
+            # extend p0 or replace p0 by new points
+            p0 = new.reshape(-1, 1, 2)
+            # p0 = np.append(p0, new).reshape(-1, 1, 2).astype(np.float32)
+            # if (len(p0) > NUMOFDOTS) :
+            #     # print("\t\t-", str(len(p0) - NUMOFDOTS))
+            #     p0 = p0[-NUMOFDOTS:]
 
         count += 1
+        last_update_round += 1
     
-    save_object(lines, './line_segments.pkl')
+    plt.ioff()
+    plt.show()
 
-    with open(f'./vps_{video_name}.csv', 'w', newline='') as f:
+    # save_object(lines, './line_segments.pkl')
+
+    with open(f'./vps/vps_{video_name}.csv', 'w', newline='') as f:
         write = csv.writer(f)
         write.writerow(["x", "y"])
-        write.writerows(total_vps)
+        write.writerows(vp_history)
     print('-'*30)
     print("total lines: ", len(lines))
 
@@ -508,33 +549,16 @@ def Run():
     cv.destroyAllWindows()
 
     cap.release()
-"""
-    # plt.title("Optical Flow Length Distribution")
-    # plt.xlabel("time")
-    # plt.ylabel("length of optical flow")
-    # plt.scatter(range(len(lengths)), lengths, 3)
-    # plt.show()
-
-    # plt.title("Optical Flow Length Frequency")
-    # plt.hist(lengths, label="frequency", bins=100)
-    # plt.xlabel("length of optical flow")
-    # plt.ylabel("frequency")
-    # plt.show()
-"""
 # end of Run()
 
-def reject_outliers(data, m = 2.):
-    data = data[data != 0.0]
-    d = np.abs(data - np.median(data))
-    mdev = np.median(d)
-    s = d/mdev if mdev else 0.
-    return data[s<m]
-
 def data_statistic():
+
+    plt.figure(figsize=(12, 8), dpi=80)
+
     x=[]
     y=[]
 
-    with open(f'vps_{video_name}.csv') as csvfile:
+    with open(f'./vps/vps_{video_name}.csv') as csvfile:
         rows = csv.reader(csvfile)
         next(rows, None)
         for row in rows:
@@ -542,48 +566,74 @@ def data_statistic():
             y.append(float(row[1]))
     # print(x, y)
     plt.title("VP distribution")
+    plt.xlim(0, WID)
+    plt.ylim(0, Hei)
     plt.xlabel("x")
     plt.ylabel("y")
     plt.scatter(x, y, 10)
     plt.gca().invert_yaxis()
+    plt.axis('scaled')
     plt.show()
 
-"""
-    # lines = read_object('./line_segments.pkl')
-    # print(lines[0].length)
-    # lens = np.array([ele.length for ele in lines])
-    # lens_new = reject_outliers(lens, m=20.)
-    # print(lens.shape)
-    # print(lens_new.shape)
+def plot_vp(vps, cps, best_vp, vl, num):
+    x = [row.x for row in vps[-num:]]
+    y = [row.y for row in vps[-num:]]
 
-    # print(np.std(lens), np.mean(lens), np.median(lens))
-    # print(np.std(lens_new), np.mean(lens_new), np.median(lens_new))
+    x_c = [row.x for row in cps[-num:]]
+    y_c = [row.y for row in cps[-num:]]
+
     
-    # plt.title("Optical Flow Length Distribution")
-    # plt.xlabel("time")
-    # plt.ylabel("length of optical flow")
-    # plt.scatter(range(len(lens)), lens, 3)
-    # plt.show()
+    plt.clf()
+    plt.title(f"Recent {num} Points")
+    # plt.figure(figsize=(12, 8), dpi=80)
+    plt.xlim(WID//5*2, WID//5*3)
+    plt.ylim(Hei//2, Hei//4*3)
+    plt.gca().invert_yaxis()
+    plt.axis('scaled')
+    plt.ylabel("y axis")
+    plt.xlabel("x axis")
+    plt.scatter(WID/2, Hei/2, 100, 'r')
+    plt.scatter(x_c, y_c, 10, 'y')
+    plt.scatter(x, y, 20, 'b')
+    plt.scatter(best_vp.x, best_vp.y, 100, 'black')
+    lp, rp, up, dp = vl()
+    if lp is not None and up is not None:
+        # print(lp, rp)
+        plt.plot([lp[0], rp[0]], [lp[1], rp[1]])
+        plt.plot([up[0], dp[0]], [up[1], dp[1]])
+    plt.legend(["center", "cross points", "vps", "best point", "vanishing line"])
+    plt.pause(0.001)
+
+def plot_vp_rotate(vps, cps, best_vp, vl, num):
+    x = [row.y for row in vps[-num:]]
+    y = [row.x for row in vps[-num:]]
+
+    x_c = [row.y for row in cps[-num:]]
+    y_c = [row.x for row in cps[-num:]]
+
     
-    # plt.title("Optical Flow Length Distribution")
-    # plt.xlabel("time")
-    # plt.ylabel("length of optical flow")
-    # plt.scatter(range(len(lens_new)), lens_new, 3)
-    # plt.show()
+    plt.clf()
+    plt.title(f"Recent {num} Points")
+    # plt.figure(figsize=(12, 8), dpi=80)
+    plt.ylim(WID//5*2, WID//5*3)
+    plt.xlim(Hei//2, Hei//4*3)
+    # plt.gca().invert_yaxis()
+    plt.axis('scaled')
+    plt.ylabel("x axis")
+    plt.xlabel("y axis")
+    plt.scatter(Hei/2, WID/2, 100, 'r')
+    plt.scatter(x_c, y_c, 10, 'y')
+    plt.scatter(x, y, 20, 'b')
+    plt.scatter(best_vp.y, best_vp.x, 100, 'black')
+    lp, rp, up, dp = vl()
+    if lp is not None and up is not None:
+        # print(lp, rp)
+        plt.plot([lp[1], rp[1]], [lp[0], rp[0]])
+        plt.plot([up[1], dp[1]], [up[0], dp[0]])
+    plt.legend(["center", "cross points", "vps", "best point", "vanishing line"])
+    plt.pause(0.001)
 
-    # plt.title("Optical Flow Length Frequency")
-    # plt.hist(lens, label="frequency", bins=100)
-    # plt.xlabel("length of optical flow")
-    # plt.ylabel("frequency")
-    # plt.show()
-
-    # plt.title("Optical Flow Length Frequency")
-    # plt.hist(lens_new, label="frequency", bins=100)
-    # plt.xlabel("length of optical flow")
-    # plt.ylabel("frequency")
-    # plt.show()
-"""
-
-
-Run()
-data_statistic()
+if __name__ == '__main__':
+    setup()
+    Run()
+    data_statistic()
