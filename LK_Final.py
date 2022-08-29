@@ -17,22 +17,38 @@ import matplotlib.pyplot as plt
 import pickle
 from scipy import stats
 
-WID = 860               # window width
-Hei = 540               # window height
-TP_NUM = 20             # maximum tracking points at the same time
-VP_NUM = 15             # number of recent cross points references to update the best VP per round
-VP_UPDATE_RATE = 0.3    # update rate to the best VP
-FL_UPDATE_RATE = 0.01   # update rate for calculating average length of flow lines
-TP_UPDATE_RATE = 0.3    # update rate tracking points when they are not enough
-TP_UPDATE_TIME = 10     # number of frames to update tracking points 
-MIN_ANG_DIF = 25        # (degree) max acceptable angle difference of 2 lines to construct cross pt 
-MAX_CP_STD = 1.0        # max acceptable standard deviation range of new cross points (distance between cross point and best VP)
-MIN_FL_LEN = 2.         # shortest acceptable length of flow lines
-CP_THOLD = 1/15         # max distance acceptable from new cross point to the VP (proportion of the window)
-HIDE_VP_THOLD = 50      # the number of frames that VP has not updated to reset VP
-FL_UPDATE_METH = "EXT"  # EXTEND flow points or REPLACE them by new points
+WID = 860               
+"window width"
+Hei = 540               
+"window height"
+TP_NUM = 20             
+"maximum tracking points at the same time"
+VP_NUM = 15
+"number of recent cross points references to update the best VP per round"
+VP_UPDATE_RATE = 0.3
+"update rate to the best VP"
+FL_UPDATE_RATE = 0.01
+"update rate for calculating average length of flow lines"
+TP_UPDATE_RATE = 0.3
+"update rate tracking points when they are not enough"
+TP_UPDATE_TIME = 10
+"number of frames to update tracking points "
+MIN_ANG_DIF = 25
+"(degree) max acceptable angle difference of 2 lines to construct cross pt"
+MAX_CP_STD = 1.0
+"max acceptable standard deviation range of new cross points (distance between cross point and best VP)"
+MIN_FL_LEN = 2.
+"shortest acceptable length of flow lines"
+CP_THOLD = 1/15
+"max distance acceptable from new cross point to the VP (proportion of the window)"
+HIDE_VP_THOLD = 50
+"the number of frames that VP has not updated to reset VP"
+FL_UPDATE_METH = "EXT"
+"EXTend flow points or REPlace them by new points"
+
 
 def setup():
+    """Setup global variables"""
     global cap, feature_params, lk_params, color, video_name
 
     plt.figure(figsize=(12, 8), dpi=80)
@@ -50,10 +66,10 @@ def setup():
         raise Exception("Could not open video device")
 
     # params for ShiTomasi corner detection
-    feature_params = dict( maxCorners = int(TP_NUM/4),
-                        qualityLevel = 0.3,
-                        minDistance = 7,
-                        blockSize = 7 )
+    feature_params = dict(  maxCorners = int(TP_NUM/4),
+                            qualityLevel = 0.3,
+                            minDistance = 7,
+                            blockSize = 7 )
 
     # Parameters for lucas kanade optical flow
     lk_params = dict( winSize  = (15, 15),
@@ -86,6 +102,37 @@ def angle_between(v1, v2):
     return angle
 
 class VP:
+    """
+    Vanishing Point/Cross Point Class
+    =====
+    A class to represent a vanishing point or cross point.
+
+    ...
+
+    Attributes
+    ----------
+    x : float
+        x coordinate value
+    y : float
+        y coordinate value
+
+    Methods
+    -------
+    is_init():
+        Check whether the point is initialized.
+
+    has_moved():
+        Check whether the point has moved.
+
+    set(x, y):
+        Initialize the point with coordinate values.
+
+    update(x, y):
+        Update the point with movement coordinate values.
+
+    check_valid(best):
+        Check whether the new cross point is too far from the current vanishing point
+    """
     def __init__(self, isbest: bool, x=None, y=None) -> None:
         self._isinit = not isbest
         self._moved = False
@@ -100,12 +147,14 @@ class VP:
         return (self.x, self.y)
 
     def set(self, x, y):
+        """Initialize the point with coordinate values."""
         self._isinit = True
         self.x = x
         self.y = y
         print("VP init")
 
     def update(self, x, y):
+        """Update the point with movement coordinate values."""
         if (not self._isinit):
             raise Exception("VP is not initialized")
         self._moved = True
@@ -119,11 +168,26 @@ class VP:
         return self._moved
 
     def check_valid(self, best) -> bool:
-        """Check whether the new cross point is 
-        too far from the current vanishing point"""
+        """Check whether the new cross point is too far from the current vanishing point"""
         return (np.absolute(self-best) < np.array([WID*CP_THOLD, Hei*CP_THOLD])).all()
 
 class VL:
+    """
+    Vanishing Line Class
+    =====
+    A class to represent a pair of vanishing lines.
+
+    ...
+
+    Attributes
+    ----------
+    None
+
+    Methods
+    -------
+    update(vps: list, best_vp: VP):
+        Update the line pairs with a list of VP history and the current best vanishing point.
+    """
     def __init__(self):
         self._isinit = False
 
@@ -131,60 +195,88 @@ class VL:
         if not self._isinit:
             return None, None, None, None
         if mode == 'best_point':
-            return self.lp, self.rp, self.up, self.dp
+            return self._lp, self._rp, self._up, self._dp
         else :
-            return self.calculate_lr()
+            return self._calculate_endpt()
 
     def update(self, vps: list, best_vp: VP):
+        """Update the line pairs with a list of VP history and the current best vanishing point."""
         if best_vp.has_moved():
             self._isinit = True
-            self.bp = (best_vp.x, best_vp.y)
+            self._bp = (best_vp.x, best_vp.y)
             x = [row.x for row in vps]
             y = [row.y for row in vps]
 
             slope, intercept, r, p, std_err = stats.linregress(x, y)
-            self.m = slope
-            self.intercept = intercept
+            self._m = slope
+            self._intercept = intercept
 
             slope, intercept, r, p, std_err = stats.linregress(y, x)
-            self.mv = slope
-            self.interceptv = intercept
+            self._mv = slope
+            self._interceptv = intercept
 
-            self.lp = (0, self.bp[1] - self.bp[0]*self.m)
-            self.rp = (WID-1, self.bp[1] + (WID - 1 - self.bp[0])*self.m)
-            self.up = (self.bp[0] - self.bp[1]*self.mv, 0)
-            self.dp = (self.bp[0] + (Hei-1 - self.bp[1])*self.mv, Hei-1)
+            self._lp = (0, self._bp[1] - self._bp[0]*self._m)
+            self._rp = (WID-1, self._bp[1] + (WID - 1 - self._bp[0])*self._m)
+            self._up = (self._bp[0] - self._bp[1]*self._mv, 0)
+            self._dp = (self._bp[0] + (Hei-1 - self._bp[1])*self._mv, Hei-1)
 
-    def calculate_lr(self):
-        l = (0, self.intercept)
-        r = (WID-1, self.intercept + (WID-1)*self.m)
-        u = (self.interceptv, 0)
-        d = (self.interceptv + (Hei-1)*self.mv, Hei-1)
+    def _calculate_endpt(self):
+        l = (0, self._intercept)
+        r = (WID-1, self._intercept + (WID-1)*self._m)
+        u = (self._interceptv, 0)
+        d = (self._interceptv + (Hei-1)*self._mv, Hei-1)
         return l, r, u, d
 
-# Line Segment Class
 class FlowLine:
+    """
+    Optical Flow Line Segment Class
+    =====
+    A class to represent a optical flow line.
+
+    ...
+
+    Attributes
+    ----------
+    start : array
+        Start point.
+    stop : array
+        End point.
+    length : float
+        Length of the line.
+    angle : float
+        Angle on the xy-coordinate system of the line.
+    color : array
+        BRG value of the line color.
+
+    Methods
+    -------
+    get_info(vps: list, best_vp: VP):
+        Print the information of the line.
+    """
     def __init__(self, start=[0, 0], stop=[0, 0], color=[0,0,0]):
-        # print(start, stop)
-        # self.start = np.array(np.multiply(start, [1, -1])+[0, Hei]) 
-        # self.stop = np.array(np.multiply(stop, [1, -1]))
         self.start = np.array(start) 
         self.stop = np.array(stop)
-        self.vector = np.subtract(np.multiply(self.stop, [1, -1]), 
-                                np.multiply(self.start, [1, -1]))    # xy座標平面
-        self.length = np.round(np.linalg.norm(self.vector), 2)
-        self.angle = angle_between(self.vector, [1, 0])     # xy座標平面
+        self._vector = np.subtract(np.multiply(self.stop, [1, -1]), 
+                                np.multiply(self.start, [1, -1]))
+        self._length = np.round(np.linalg.norm(self._vector), 2)
+        self.angle = angle_between(self._vector, [1, 0])
         self.color = color
 
+    def __len__(self):
+        return self._length
+
     def get_info(self):
+        """Print the information of the line."""
         # print(self.start)
         # print(str(self.length) + '\t\t' + str(self.angle))
         # print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(self.vector) + '\t\t' + str(self.length) + '\t\t' + str(self.angle))
         print(str(self.start) + '\t\t'  + str(self.stop) + '\t\t'  + str(np.concatenate([self.start, self.stop])))
+        pass
 
-def cross_point(line1, line2):  # 計算交點函數
-    # print(line1, line2)
-    x1 = line1[0]  # 取四點座標
+def cross_point(line1, line2):
+    """calculate cross point of 2 lines"""
+    
+    x1 = line1[0]
     y1 = line1[1]
     x2 = line1[2]
     y2 = line1[3]
@@ -194,13 +286,13 @@ def cross_point(line1, line2):  # 計算交點函數
     x4 = line2[2]
     y4 = line2[3]
 
-    k1 = (y2-y1)*1.0/(x2-x1)  # 計算k1,由於點均爲整數，需要進行浮點數轉化
-    b1 = y1*1.0-x1*k1*1.0  # 整型轉浮點型是關鍵
-    if (x4-x3) == 0:  # L2直線斜率不存在操作
+    k1 = (y2-y1)*1.0/(x2-x1)
+    b1 = y1*1.0-x1*k1*1.0
+    if (x4-x3) == 0:
         k2 = None
         b2 = 0
     else:
-        k2 = (y4-y3)*1.0/(x4-x3)  # 斜率存在操作
+        k2 = (y4-y3)*1.0/(x4-x3)
         b2 = y3*1.0-x3*k2*1.0
     if k2 == None:
         x = x3
@@ -212,10 +304,24 @@ def cross_point(line1, line2):  # 計算交點函數
     return [x, y]
 
 def checkInside(pt, mask = [], st = []):
+    """
+        Brief
+        ---
+        Check whether the tracking point is still inside the ROI.
+
+        Parameters
+        ---
+        mask : array
+            A list coordinates of the boundary points.
+        st : array
+            A list of current status.
+
+        Returns
+        ---
+        isInside : boolean
+    """
     status = []
     for id in range(len(pt)):
-        # print("pt[{id}] ", pt[id])
-        # print("mask.shape ", mask.shape)
         if st[id,0] == 0 or floor(pt[id,0,1])>mask.shape[0] or floor(pt[id,0,0])>mask.shape[1] :
             status.append([0])
         else:
@@ -223,20 +329,30 @@ def checkInside(pt, mask = [], st = []):
     return np.array(status)
 
 def modify_contrast_and_brightness2(img, brightness=0 , contrast=100):
-    # 上面做法的問題：有做到對比增強，白的的確更白了。
-    # 但沒有實現「黑的更黑」的效果
-    import math
+    """
+        Brief
+        ---
+        Modify contrast and brightness of the image.
 
-    # brightness = 0
-    # contrast = 150 # - 減少對比度/+ 增加對比度
+        Parameters
+        ---
+        brightness : int
+
+        contrast : int
+            Positive value for increase contrast, negative for decrease contrast.
+
+        Returns
+        ---
+        img : array
+            A modified 2D image.
+    """
+    import math
 
     B = brightness / 255.0
     c = contrast / 255.0 
     k = math.tan((45 + 44 * c) / 180 * math.pi)
 
     img = (img - 127.5 * (1 - B)) * k + 127.5 * (1 + B)
-
-    # 所有值必須介於 0~255 之間，超過255 = 255，小於 0 = 0
     img = np.clip(img, 0, 255).astype(np.uint8)
     return img
 
@@ -265,13 +381,14 @@ def read_csv(filename):
             y.append(float(row[1]))
     return x, y
 
-def process_img(frame, mask, border):
-    test = cv.cvtColor(frame, cv.COLOR_BGR2GRAY)
+def process_img(img):
+    """Process the image so as to do the feature tracking."""
+    processed_img = cv.cvtColor(img, cv.COLOR_BGR2GRAY)
     # test = np.float32(test)
     # test = (test - np.mean(test))/np.std(test)
     # test = test / 255
     # test = test * (255/4) + (255/2)
-    test = modify_contrast_and_brightness2(test)
+    processed_img = modify_contrast_and_brightness2(processed_img)
     # test = np.clip(test, 0, 255)
     # test = np.uint8(test)
     # test[mask == 0] = 0
@@ -279,23 +396,24 @@ def process_img(frame, mask, border):
     # avg_shi = np.round(np.mean(test[mask]), 2)
     # avg_shi = np.round(np.mean(test[border:]), 2)
     # avg_shi = min(max(50, avg_shi), 100)
-
-    test = cv.GaussianBlur(test, (3, 3), 0)
+    processed_img = cv.GaussianBlur(processed_img, (5, 5), 0)
+    # processed_frame = cv.GaussianBlur(processed_frame, (3, 3), 0)
     # test = cv.threshold(test, np.mean(test[test!=0]) + np.std(test[test!=0])*1.5, 255, cv.THRESH_BINARY)[1]
     # kernel = np.ones((3,3), np.uint8)
     # test = cv.erode(test, None, iterations=1)
     # test = cv.dilate(test, None, iterations=1)
-    return test
+    return processed_img
     
-# Take first frame and find corners in it
 def Run():
+    # Take first frame and find corners in it
     ret, old_frame = cap.read()
     ratio = cap.get(cv.CAP_PROP_FRAME_HEIGHT)/cap.get(cv.CAP_PROP_FRAME_WIDTH)
     global Hei
     Hei = int(WID*ratio)
     old_frame = imutils.resize(old_frame, width=int(WID))     
     center = (int(WID/2), int(Hei/2))
-    # Detection Bound
+    
+    # ROI Boundary
     bounds = dict(
         outerL= int(WID*0.2),
         outerU= int(Hei*0.65),
@@ -337,7 +455,7 @@ def Run():
         cv.imshow('frame', small_mask[i])
         cv.waitKey(100)
 
-    processed_old_frame = process_img(old_frame, mask, bounds["innerU"])
+    processed_old_frame = process_img(old_frame)
 
     p0 = []
     for i in range(4):
@@ -353,8 +471,9 @@ def Run():
     best_vp = VP(isbest=True)
     prev_time = time.time()
     avg_len = MIN_FL_LEN
-    vp_ult = 0  # number of frames since last time vanishing point updated
-    tp_ult = 0  # number of frames since last time tracking point updated
+
+    vp_ult = 0  #: number of frames passed since last time vanishing point updated
+    tp_ult = 0  #: number of frames passed since last time tracking point updated
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
     
     while(1):
@@ -366,7 +485,7 @@ def Run():
             break
         
         frame = imutils.resize(frame, width=int(WID))
-        processed_frame = process_img(frame, mask, bounds["innerU"])
+        processed_frame = process_img(frame)
 
         """
         # Bird's eye view
@@ -408,13 +527,13 @@ def Run():
                     continue
                 new_line = FlowLine([c, d], [a, b], color[i])
             
-                if (new_line.angle > 180 and new_line.length > MIN_FL_LEN):  
-                    if (new_line.length > avg_len):
+                if (new_line.angle > 180 and len(new_line) > MIN_FL_LEN):  
+                    if (len(new_line) > avg_len):
                         flow_lines.append(new_line)
                         cur_lines.append(new_line)
                         all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), 
                                         (floor(c), floor(d)), new_line.color.tolist(), 2)
-                    avg_len = (avg_len+new_line.length*FL_UPDATE_RATE)/(1+FL_UPDATE_RATE)
+                    avg_len = (avg_len+len(new_line)*FL_UPDATE_RATE)/(1+FL_UPDATE_RATE)
                 frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
 
             # Find the cross points from each pair of flow lines
@@ -455,7 +574,7 @@ def Run():
                                 sum = sum + d
                                 c = c+1
                                 
-                        # update the best VP
+                        # update the best VP with movement
                         if (c != 0):
                             sum = sum/c
                             best_vp.update(sum[0], sum[1])
@@ -503,6 +622,7 @@ def Run():
         frame = cv.circle(frame, center, 6, [0, 0, 255], -1)
         
         cv.imshow('frame', frame)
+        cv.imshow('processed frame', processed_frame)
         
         k = cv.waitKey(10) & 0xff
         if k == 27:
