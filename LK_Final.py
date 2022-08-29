@@ -25,9 +25,9 @@ TP_NUM = 20
 "maximum tracking points at the same time"
 VP_NUM = 15
 "number of recent cross points references to update the best VP per round"
-VP_UPDATE_RATE = 0.3
+VP_UPDATE_RATE = 0.5
 "update rate to the best VP"
-FL_UPDATE_RATE = 0.01
+FL_UPDATE_RATE = 0.05
 "update rate for calculating average length of flow lines"
 TP_UPDATE_RATE = 0.3
 "update rate tracking points when they are not enough"
@@ -37,14 +37,19 @@ MIN_ANG_DIF = 25
 "(degree) max acceptable angle difference of 2 lines to construct cross pt"
 MAX_CP_STD = 1.0
 "max acceptable standard deviation range of new cross points (distance between cross point and best VP)"
-MIN_FL_LEN = 2.
+MIN_FL_LEN = 1.5
 "shortest acceptable length of flow lines"
 CP_THOLD = 1/15
 "max distance acceptable from new cross point to the VP (proportion of the window)"
 HIDE_VP_THOLD = 50
 "the number of frames that VP has not updated to reset VP"
-FL_UPDATE_METH = "EXT"
-"EXTend flow points or REPlace them by new points"
+# FL_UPDATE_METH = "EXT"
+# "EXTend flow points or REPlace them by new points"
+SHOW_VL = 0
+"0/no show, 1/show VL on frame, 2/show VL on both frame and plot"
+VP_REF = 300
+"Number of referenced VPs in VP history (0 for all vps)"
+WRITE_VIDEO = False
 
 
 def setup():
@@ -107,8 +112,6 @@ class VP:
     =====
     A class to represent a vanishing point or cross point.
 
-    ...
-
     Attributes
     ----------
     x : float
@@ -155,7 +158,7 @@ class VP:
 
     def update(self, x, y):
         """Update the point with movement coordinate values."""
-        if (not self._isinit):
+        if not self._isinit:
             raise Exception("VP is not initialized")
         self._moved = True
         self.x = self.x + x * VP_UPDATE_RATE
@@ -177,8 +180,6 @@ class VL:
     =====
     A class to represent a pair of vanishing lines.
 
-    ...
-
     Attributes
     ----------
     None
@@ -193,9 +194,10 @@ class VL:
 
     def __call__(self, mode = 'best_point'):
         if not self._isinit:
-            return None, None, None, None
+            return None, None, None, None, None
         if mode == 'best_point':
-            return self._lp, self._rp, self._up, self._dp
+            st = self._intercept is not nan and self._interceptv is not nan
+            return self._lp, self._rp, self._up, self._dp, st
         else :
             return self._calculate_endpt()
 
@@ -225,7 +227,8 @@ class VL:
         r = (WID-1, self._intercept + (WID-1)*self._m)
         u = (self._interceptv, 0)
         d = (self._interceptv + (Hei-1)*self._mv, Hei-1)
-        return l, r, u, d
+        st = self._intercept is not nan and self._interceptv is not nan
+        return l, r, u, d, st
 
 class FlowLine:
     """
@@ -233,16 +236,12 @@ class FlowLine:
     =====
     A class to represent a optical flow line.
 
-    ...
-
     Attributes
     ----------
     start : array
         Start point.
     stop : array
         End point.
-    length : float
-        Length of the line.
     angle : float
         Angle on the xy-coordinate system of the line.
     color : array
@@ -252,18 +251,20 @@ class FlowLine:
     -------
     get_info(vps: list, best_vp: VP):
         Print the information of the line.
+    length():
+        Return the length of the line.
     """
     def __init__(self, start=[0, 0], stop=[0, 0], color=[0,0,0]):
         self.start = np.array(start) 
         self.stop = np.array(stop)
         self._vector = np.subtract(np.multiply(self.stop, [1, -1]), 
                                 np.multiply(self.start, [1, -1]))
-        self._length = np.round(np.linalg.norm(self._vector), 2)
+        self._len = np.round(np.linalg.norm(self._vector), 2)
         self.angle = angle_between(self._vector, [1, 0])
         self.color = color
 
-    def __len__(self):
-        return self._length
+    def length(self):
+        return self._len
 
     def get_info(self):
         """Print the information of the line."""
@@ -388,7 +389,7 @@ def process_img(img):
     # test = (test - np.mean(test))/np.std(test)
     # test = test / 255
     # test = test * (255/4) + (255/2)
-    processed_img = modify_contrast_and_brightness2(processed_img)
+    # processed_img = modify_contrast_and_brightness2(processed_img)
     # test = np.clip(test, 0, 255)
     # test = np.uint8(test)
     # test[mask == 0] = 0
@@ -396,8 +397,8 @@ def process_img(img):
     # avg_shi = np.round(np.mean(test[mask]), 2)
     # avg_shi = np.round(np.mean(test[border:]), 2)
     # avg_shi = min(max(50, avg_shi), 100)
-    processed_img = cv.GaussianBlur(processed_img, (5, 5), 0)
-    # processed_frame = cv.GaussianBlur(processed_frame, (3, 3), 0)
+    # processed_img = cv.GaussianBlur(processed_img, (5, 5), 0)
+    processed_img = cv.GaussianBlur(processed_img, (3, 3), 0)
     # test = cv.threshold(test, np.mean(test[test!=0]) + np.std(test[test!=0])*1.5, 255, cv.THRESH_BINARY)[1]
     # kernel = np.ones((3,3), np.uint8)
     # test = cv.erode(test, None, iterations=1)
@@ -412,6 +413,10 @@ def Run():
     Hei = int(WID*ratio)
     old_frame = imutils.resize(old_frame, width=int(WID))     
     center = (int(WID/2), int(Hei/2))
+
+    if WRITE_VIDEO:
+        out = cv.VideoWriter('./saved_video/output.avi', 
+            cv.VideoWriter_fourcc(*'MJPG'), 30, (WID,  Hei))
     
     # ROI Boundary
     bounds = dict(
@@ -457,12 +462,15 @@ def Run():
 
     processed_old_frame = process_img(old_frame)
 
-    p0 = []
-    for i in range(4):
-        new = cv.goodFeaturesToTrack(processed_old_frame, mask = small_mask[i], **feature_params)
-        if new is not None:
-            p0.extend(new)
-    p0 = np.array(p0)
+    p0s = []
+    for j in range(2):
+        p0 = []
+        for i in range(2):
+            new = cv.goodFeaturesToTrack(processed_old_frame, mask = small_mask[j*2+i], **feature_params)
+            if new is not None:
+                p0.extend(new)
+        p0 = np.array(p0, dtype=np.float32)
+        p0s.append(p0)
     
     vp_history_xy, all_vp = [], []
     recent_cps, all_cps = [], []
@@ -470,13 +478,15 @@ def Run():
     vl = VL()
     best_vp = VP(isbest=True)
     prev_time = time.time()
-    avg_len = MIN_FL_LEN
+    avg_len = [MIN_FL_LEN, MIN_FL_LEN]
 
     vp_ult = 0  #: number of frames passed since last time vanishing point updated
     tp_ult = 0  #: number of frames passed since last time tracking point updated
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
-    
+    draw_mask = np.zeros_like(old_frame)
+
     while(1):
+        print(avg_len)
         ret, frame = cap.read()
         if not ret:
             print('No frames grabbed!')
@@ -498,49 +508,56 @@ def Run():
 
         cur_frame = np.zeros_like(processed_frame)
         """
-        good_new = []
-        good_old = []
-        cur_lines = []
-        
-        if len(p0) != 0:
-            # calculate optical flow
-            p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, 
-                            processed_frame, p0, None, **lk_params)
-            
-            # Select good points
-            # Check if the line is still inside the mask
-            if p1 is not None:
-                filter = checkInside(p1, mask, st)
-                st[~filter] = 0
-                good_new.extend(p1[st==1])
-                good_old.extend(p0[st==1])
-            
-            good_new = np.array(good_new)
-            good_old = np.array(good_old)
-            p0 = good_new.reshape(-1, 1, 2)
-
-            # Find The Flow Lines
-            for i, (new, old) in enumerate(zip(good_new, good_old)):
-                a, b = new.ravel()
-                c, d = old.ravel()
-                if a==c and b==d:
+        cur_lines_total = []
+        p0 = []
+        if len(p0s[0]) != 0 or len(p0s[1]) != 0:
+            for n, p0_ in enumerate(p0s):
+                if len(p0_) == 0:
                     continue
-                new_line = FlowLine([c, d], [a, b], color[i])
+                good_new = []
+                good_old = []
+                cur_lines = []
+                # calculate optical flow
+                p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, 
+                                processed_frame, p0_, None, **lk_params)
+                
+                # Select good points
+                # Check if the line is still inside the mask
+                if p1 is not None:
+                    filter = checkInside(p1, mask, st)
+                    st[~filter] = 0
+                    good_new.extend(p1[st==1])
+                    good_old.extend(p0_[st==1])
+                
+                good_new = np.array(good_new)
+                good_old = np.array(good_old)
+                p0s[n] = np.append(p0_, good_new.reshape(-1, 1, 2))
+                
+                # Find The Flow Lines
+                for i, (new, old) in enumerate(zip(good_new, good_old)):
+                    a, b = new.ravel()
+                    c, d = old.ravel()
+                    if a==c and b==d:
+                        continue
+                    new_line = FlowLine([c, d], [a, b], color[i])
+                    if new_line.angle > 180 and new_line.length() > MIN_FL_LEN:  
+                        avg_len[n] = (avg_len[n] + new_line.length()*FL_UPDATE_RATE)/(1+FL_UPDATE_RATE)
+                        if new_line.length() > avg_len[n]:
+                            flow_lines.append(new_line)
+                            cur_lines.append(new_line)
+                            draw_mask = cv.line(draw_mask, (int(a), int(b)), 
+                                    (int(c), int(d)), color[i].tolist(), 2)
+                            all_lines_frame = cv.line(all_lines_frame, (int(a), int(b)), 
+                                    (int(c), int(d)), new_line.color.tolist(), 2)
+                    frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
+                cur_lines_total.extend(cur_lines)
+            p0 = np.array(p0)
             
-                if (new_line.angle > 180 and len(new_line) > MIN_FL_LEN):  
-                    if (len(new_line) > avg_len):
-                        flow_lines.append(new_line)
-                        cur_lines.append(new_line)
-                        all_lines_frame = cv.line(all_lines_frame, (floor(a), floor(b)), 
-                                        (floor(c), floor(d)), new_line.color.tolist(), 2)
-                    avg_len = (avg_len+len(new_line)*FL_UPDATE_RATE)/(1+FL_UPDATE_RATE)
-                frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
-
             # Find the cross points from each pair of flow lines
-            for pair in itertools.combinations(cur_lines, 2):
+            for pair in itertools.combinations(cur_lines_total, 2):
                 l1, l2 = pair
                 angle_diff = abs(l1.angle - l2.angle)
-                if (angle_diff > MIN_ANG_DIF and angle_diff < 360-MIN_ANG_DIF):
+                if angle_diff > MIN_ANG_DIF and angle_diff < 360-MIN_ANG_DIF:
                     x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
                                         np.concatenate([l1.start, l1.stop]))
                     if x is nan or y is nan:
@@ -554,7 +571,7 @@ def Run():
                     all_cps.append(new_cp)
 
                     # if the best vanishing point is found
-                    if (best_vp.is_init()):
+                    if best_vp.is_init():
                         if not new_cp.check_valid(best_vp):
                             recent_cps.pop()
                             all_cps.pop()
@@ -575,9 +592,11 @@ def Run():
                                 c = c+1
                                 
                         # update the best VP with movement
-                        if (c != 0):
+                        if c != 0:
                             sum = sum/c
                             best_vp.update(sum[0], sum[1])
+                            vp_history_xy.append((best_vp.x, best_vp.y))
+                            all_vp.append(deepcopy(best_vp))
                             vp_ult = 0
 
                     # initialize VP
@@ -588,6 +607,9 @@ def Run():
                         sum = sum/VP_NUM
                         best_vp.set(sum[0], sum[1])
                         vp_ult = 0
+
+                    else:
+                        print("# of recent cross point:", len(recent_cps))
             
             # VP updated long time ago
             if best_vp.is_init() and vp_ult > HIDE_VP_THOLD :
@@ -596,20 +618,24 @@ def Run():
                 print("hide")
 
         # show the best VP (Green)
-        if (best_vp.is_init()):
+        if best_vp.is_init():
             vp_history_xy.append((best_vp.x, best_vp.y))
             all_vp.append(deepcopy(best_vp))
-            vl.update(all_vp, best_vp)
-            lp, rp, up, dp = vl()
-            if (lp is not None):
-                frame = cv.line(frame, (int(lp[0]), int(lp[1])), (int(rp[0]), int(rp[1])), [0, 200, 50], 2)
-                frame = cv.line(frame, (int(up[0]), int(up[1])), (int(dp[0]), int(dp[1])), [0, 200, 50], 2)
+            vl.update(all_vp[-VP_REF:], best_vp)
+            if SHOW_VL > 0:
+                lp, rp, up, dp, st = vl()
+                if st:
+                    frame = cv.line(frame, (int(lp[0]), int(lp[1])), (int(rp[0]), int(rp[1])), [0, 200, 50], 2)
+                    frame = cv.line(frame, (int(up[0]), int(up[1])), (int(dp[0]), int(dp[1])), [0, 200, 50], 2)
             frame = cv.circle(frame, (int(best_vp.x), int(best_vp.y)), 6, [0, 255, 100], -1)
             all_lines_frame = cv.circle(all_lines_frame, 
                                 (int(best_vp.x), int(best_vp.y)), 2, [0, 255, 100], -1)
             
-            plot_vp(all_vp, all_cps, best_vp, vl, 0)
+            plot_vp(all_vp, all_cps, best_vp, vl)
         
+        if WRITE_VIDEO:
+            out.write(cv.add(frame, draw_mask))
+
         # calculate FPS & draw on the frame
         new_time = time.time()
         fps = int(1/(new_time-prev_time))
@@ -620,10 +646,11 @@ def Run():
                                                 mask_points[5], mask_points[7]])], 
                                                 True, (0, 0, 100), 2)
         frame = cv.circle(frame, center, 6, [0, 0, 255], -1)
-        
-        cv.imshow('frame', frame)
-        cv.imshow('processed frame', processed_frame)
-        
+        img = cv.add(frame, draw_mask)
+        cv.imshow('frame', img)
+        # cv.imshow('frame', frame)
+        # cv.imshow('processed frame', processed_frame)
+                
         k = cv.waitKey(10) & 0xff
         if k == 27:
             cv.destroyAllWindows()
@@ -640,22 +667,19 @@ def Run():
         if len(p0) < TP_NUM*TP_UPDATE_RATE or tp_ult == TP_UPDATE_TIME:
             tp_ult = 0
             new = []
-            for i in range(4):
-                result = cv.goodFeaturesToTrack(processed_old_frame, 
-                            mask = small_mask[i], **feature_params)
-                if result is not None:
-                    new.extend(result)
-            new = np.array(new, dtype=np.float32)
+
+            for j in range(2):
+                new_ = []
+                for i in range(2):
+                    result = cv.goodFeaturesToTrack(processed_old_frame, mask = small_mask[j*2+i], **feature_params)
+                    if result is not None:
+                        new_.extend(result)
+                new_ = np.array(new_, dtype=np.float32)
+                new.append(new_)
             
             # EXTend p0 or REPlace p0 by new points
             if new is not None:
-                if FL_UPDATE_METH == "REP":
-                    p0 = new.reshape(-1, 1, 2)
-                    
-                elif FL_UPDATE_METH == "EXT":
-                    p0 = np.append(p0, new).reshape(-1, 1, 2).astype(np.float32)
-                    if (len(p0) > TP_NUM) :
-                        p0 = p0[-TP_NUM:]
+                p0s = new
 
         tp_ult += 1
         vp_ult += 1
@@ -675,6 +699,8 @@ def Run():
     cv.destroyAllWindows()
     save_csv(vp_history_xy, video_name)
     cap.release()
+    if WRITE_VIDEO:
+        out.release()
 # end of Run()
 
 def data_statistic():
@@ -690,16 +716,16 @@ def data_statistic():
     plt.axis('scaled')
     plt.show()
 
-def plot_vp(vps, cps, best_vp, vl, num):
-    x = [row.x for row in vps[-num:]]
-    y = [row.y for row in vps[-num:]]
+def plot_vp(vps, cps, best_vp, vl):
+    """Plot the best VP, vanishing line, VP history and recent cross points."""
+    x = [row.x for row in vps[-VP_REF:]]
+    y = [row.y for row in vps[-VP_REF:]]
 
-    x_c = [row.x for row in cps[-num:]]
-    y_c = [row.y for row in cps[-num:]]
+    x_c = [row.x for row in cps[-VP_REF:]]
+    y_c = [row.y for row in cps[-VP_REF:]]
 
     plt.clf()
-    plt.title(f"Recent {num} Points")
-    # plt.figure(figsize=(12, 8), dpi=80)
+    plt.title(f"Recent {VP_REF} Points")
     plt.xlim(WID//3*1, WID//3*2)
     plt.ylim(Hei//3, Hei//4*3)
     plt.gca().invert_yaxis()
@@ -710,11 +736,11 @@ def plot_vp(vps, cps, best_vp, vl, num):
     plt.scatter(x_c, y_c, 10, 'y')
     plt.scatter(x, y, 20, 'b')
     plt.scatter(best_vp.x, best_vp.y, 100, 'black')
-    lp, rp, up, dp = vl(mode='other')
-    if lp is not None and up is not None:
-        # print(lp, rp)
-        plt.plot([lp[0], rp[0]], [lp[1], rp[1]])
-        plt.plot([up[0], dp[0]], [up[1], dp[1]])
+    if SHOW_VL > 1:
+        lp, rp, up, dp, st = vl(mode='other')
+        if st:
+            plt.plot([lp[0], rp[0]], [lp[1], rp[1]])
+            plt.plot([up[0], dp[0]], [up[1], dp[1]])
     plt.legend(["center", "cross points", "vps", "best point", "vanishing line"])
     plt.pause(0.001)
 
