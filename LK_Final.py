@@ -18,6 +18,7 @@ import matplotlib.pyplot as plt
 import pickle
 from scipy import stats
 
+# Hyper-parameters
 WID = 860               
 "window width"
 Hei = 540               
@@ -44,8 +45,8 @@ CP_THOLD = 1/15
 "max distance acceptable from new cross point to the VP (proportion of the window)"
 HIDE_VP_THOLD = 50
 "the number of frames that VP has not updated to reset VP"
-# FL_UPDATE_METH = "EXT"
-# "EXTend flow points or REPlace them by new points"
+FL_UPD_METH = "REP"
+"EXTend flow points or REPlace them by new points"
 SHOW_VL = 0
 "0/no show, 1/show VL on frame, 2/show VL on both frame and plot"
 VP_REF = 300
@@ -80,6 +81,8 @@ def setup():
     # Check success
     if not cap.isOpened():
         raise Exception("Could not open video device")
+
+    # Step 0: Setup the Parameters
 
     # params for ShiTomasi corner detection
     feature_params = dict(  maxCorners = int(TP_NUM/4),
@@ -341,7 +344,7 @@ def checkInside(pts, mask = [], st = []):
             status.append([mask[floor(pts[id,0,1]), floor(pts[id,0,0])] > 0])
     return np.array(status)
 
-def modify_contrast_and_brightness2(img, brightness=0 , contrast=100):
+def modify_contrast_and_brightness(img, brightness=0 , contrast=100):
     """
         Brief
         ---
@@ -401,7 +404,7 @@ def process_img(img):
     # test = (test - np.mean(test))/np.std(test)
     # test = test / 255
     # test = test * (255/4) + (255/2)
-    # processed_img = modify_contrast_and_brightness2(processed_img)
+    # processed_img = modify_contrast_and_brightness(processed_img)
     # test = np.clip(test, 0, 255)
     # test = np.uint8(test)
     # test[mask == 0] = 0
@@ -418,7 +421,7 @@ def process_img(img):
     return processed_img
     
 def Run():
-    # Take first frame and find corners in it
+    # Step 1: Take first frame and find corners.
     ret, old_frame = cap.read()
     ratio = cap.get(cv.CAP_PROP_FRAME_HEIGHT)/cap.get(cv.CAP_PROP_FRAME_WIDTH)
     global Hei
@@ -452,10 +455,10 @@ def Run():
                             [ bounds["innerL"],                          bounds["innerU"]],                         #左上 [7]
                             [(bounds["outerL"]+bounds["innerL"])//2,    (bounds["outerD"]+bounds["innerU"])//2]])   #左中 [8]
     
-    # cut a mask
     mask = np.zeros(old_frame.shape[:2], dtype=np.uint8)
     mask = cv.fillPoly(mask, [np.array([mask_points[1], mask_points[3], mask_points[5], mask_points[7]])], 255)
-                                        
+                        
+    # Full ROI Schematic                
     cv.imshow('frame', mask)
     cv.waitKey(200)
 
@@ -468,14 +471,17 @@ def Run():
     small_mask[2] = cv.fillPoly(small_mask[2], [np.array([mask_points[0], mask_points[4], mask_points[5], mask_points[6]])], 255)
     small_mask[3] = cv.fillPoly(small_mask[3], [np.array([mask_points[0], mask_points[6], mask_points[7], mask_points[8]])], 255)
 
+    # ROI Schematic Animation
     for i in range(4):
         cv.imshow('frame', small_mask[i])
         cv.waitKey(100)
 
     processed_old_frame = process_img(old_frame)
 
-    # Choose the points to track in the first round
-    p0s = []
+    # Step 2: Choose the points to track in the first round.
+    p0s = []    
+    # p0s is a list of 2 p0's, upper and lower part respectively.
+    # p0 is a numpy array that can be sent into optical flow function.
     for j in range(2):
         p0 = []
         for i in range(2):
@@ -493,13 +499,16 @@ def Run():
     prev_time = time.time()
     avg_len = [MIN_FL_LEN, MIN_FL_LEN]
 
-    vp_ult = 0  #: number of frames passed since last time vanishing point updated
-    tp_ult = 0  #: number of frames passed since last time tracking point updated
+    vp_ult = 0  # number of frames passed since last time VP updated
+    tp_ult = 0  # number of frames passed since last time tracking point updated
     all_lines_frame = np.zeros_like(old_frame, dtype=np.uint8)
     draw_mask = np.zeros_like(old_frame)
 
+    # Step 3: Start reading frames from videos
     while(1):
         ret, frame = cap.read()
+
+        # Step 4: Check the end of the video
         if not ret:
             print('No frames grabbed!')
             cv.destroyAllWindows()
@@ -510,6 +519,7 @@ def Run():
 
         cur_lines_total = []
         
+        # Step 5: Optical Flow Line Detected
         if len(p0s[0]) != 0 or len(p0s[1]) != 0:
             for n, p0 in enumerate(p0s):
                 if len(p0) == 0:
@@ -520,9 +530,10 @@ def Run():
                 # calculate optical flow
                 p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, 
                                 processed_frame, p0, None, **lk_params)
-                
-                # Select good points
-                # Check if the line is still inside the mask
+            
+                # Step 6: Check whether the flow lines are valid (to generate cross points)
+
+                # Step 6-1: Check if the tracked points are still inside the mask
                 if p1 is not None:
                     filter = checkInside(p1, mask, st)
                     st[~filter] = 0
@@ -533,13 +544,15 @@ def Run():
                 good_old = np.array(good_old)
                 p0s[n] = good_new.reshape(-1, 1, 2)
                 
-                # Find The Flow Lines
+                # Step 6-2: Find the Flow Lines
                 for i, (new, old) in enumerate(zip(good_new, good_old)):
                     a, b = new.ravel()
                     c, d = old.ravel()
                     if a==c and b==d:
                         continue
                     new_line = FlowLine([c, d], [a, b], color[i])
+                    
+                    # Step 6-3: Ensure the Quality of Flow Lines (direction, length)
                     if new_line.angle > 180 and new_line.length() > MIN_FL_LEN:  
                         avg_len[n] = (avg_len[n] + new_line.length()*FL_UPDATE_RATE)/(1+FL_UPDATE_RATE)
                         if new_line.length() > avg_len[n]:
@@ -552,36 +565,42 @@ def Run():
                     frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
                 cur_lines_total.extend(cur_lines)
             
-            # Find the cross points from each pair of flow lines
+            # Step 7: Find the cross points (CP) from each pair of flow lines
             for (l1, l2) in itertools.combinations(cur_lines_total, 2):
-                # l1, l2 = pair
                 angle_diff = abs(l1.angle - l2.angle)
+
+                # Step 7-1: Ensure that the CPs are generated 
+                #           by 2 lines with enough angle difference
                 if angle_diff < MIN_ANG_DIF or angle_diff > 360-MIN_ANG_DIF:
-                    # angle difference is too small
                     continue
                 x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
                                     np.concatenate([l1.start, l1.stop]))
+
+                # Step 7-2: Skip when there is no CP or the CP is lower than the flow lines
                 if x is nan or y is nan or y > l1.start[1] or y > l2.start[1]:
-                    # if the position of the cross point is lower than the flow line
                     continue
                 if not vp.is_init() or vp.check_valid(x, y):
-                    # store the cross point
+
+                    # Step 7-3: Store the valid CPs
                     new_cp = Point(isVP=False, x=x, y=y)
                     recent_cps.append(new_cp)
                     all_cps.append(new_cp)
 
-                    # if the VP is found
+                    # Step 7-4: Make Use of Stored CPs
+
+                    # Step 7-4-1: If VP exists, update the current VP
                     if vp.is_init():
-                        # culculate VP update direction
+                        # culculate update direction
                         sum = np.array([0., 0.])
                         dif = []
-                        for vp in recent_cps[-VP_REF_NUM:]:
-                            dif.append(vp - vp)
+                        for cp in recent_cps[-VP_REF_NUM:]:
+                            dif.append(cp - vp)
 
                         mean = np.mean(dif, axis=0)
                         std = np.std(dif, axis=0)
                         c = 0
                         for d in dif:
+                            # ignore too far points
                             if (np.less_equal(d, mean+std*MAX_CP_STD).all() and 
                                 np.greater_equal(d, mean-std*MAX_CP_STD).all()):
                                 sum = sum + d
@@ -595,7 +614,7 @@ def Run():
                             all_vp.append(deepcopy(vp))
                             vp_ult = 0
 
-                    # initialize VP
+                    # Step 7-4-2: If VP does not exist, initialize VP with enough CP references
                     elif (len(recent_cps) >= VP_REF_NUM):
                         sum = np.array([0., 0.])
                         for vp in recent_cps:
@@ -604,14 +623,16 @@ def Run():
                         vp.set(sum[0], sum[1])
                         vp_ult = 0
 
-
-        # show the VP (Green)
+        # Step 8: Show the VP (Green Point)
         if vp.is_init():
+
+            # Step 8-1: Hide VP when it has not updated in a long time (should be re-initialized)
             if vp_ult > HIDE_VP_THOLD :
-            # VP updated long time ago
                 vp = Point(isVP=True)
                 recent_cps = []
                 print("vp hide")
+
+            # Step 8-2: Draw on the frame and plot the data otherwise
             else:
                 vp_history_xy.append((vp.x, vp.y))
                 all_vp.append(deepcopy(vp))
@@ -627,6 +648,7 @@ def Run():
                 
                 plot_vp(all_vp, all_cps, vp, vl)
         
+        # if you want to save the video with VP & flow lines
         if WRITE_VIDEO:
             out.write(cv.add(frame, draw_mask))
 
@@ -641,10 +663,12 @@ def Run():
                                                 True, (0, 0, 100), 2)
         frame = cv.circle(frame, center, 6, [0, 0, 255], -1)
         img = cv.add(frame, draw_mask)
-        cv.imshow('frame', img)
-        # cv.imshow('frame', frame)
+        cv.imshow('frame', img) # frame with VP & flow lines
+        # cv.imshow('frame', frame) # frame with VP only
         # cv.imshow('processed frame', processed_frame)
-                
+        processed_old_frame = processed_frame.copy()
+        
+        # for key pressed down
         k = cv.waitKey(10) & 0xff
         if k == 27:
             cv.destroyAllWindows()
@@ -654,10 +678,9 @@ def Run():
             while (cv.waitKey(0) & 0xff != 32):
                 continue
 
-        # update the previous frame and previous points
-        processed_old_frame = processed_frame.copy()
         
-        # when # tracking points is not enough
+        # Step 9: If there are not enough tracking points, REPlace current points by the new points
+        #                                              (or EXTend, based on your hyper-parameters)
         if (len(p0s[0]) + len(p0s[1])) < TP_NUM*TP_UPDATE_RATE or tp_ult == TP_UPDATE_TIME:
             tp_ult = 0
             new = []
@@ -671,13 +694,18 @@ def Run():
                 new_ = np.array(new_, dtype=np.float32)
                 new.append(new_)
             
-            # EXTend p0 or REPlace p0 by new points
-            if new is not None:
-                p0s = new
+            if len(new[0]) != 0 and len(new[1]) != 0:
+                if FL_UPD_METH == "REP":
+                    p0s = new
+                elif FL_UPD_METH == "EXT":
+                    for i in range(2):
+                        p0s[i].extend(new[i])
 
         tp_ult += 1
         vp_ult += 1
     
+    # end of while loop
+
     plt.ioff()
     plt.show()
 
@@ -710,6 +738,7 @@ def data_statistic():
     plt.axis('scaled')
     plt.show()
 
+# customized pause function to focus on the OpenCV window
 def mypause(interval):
     backend = plt.rcParams['backend']
     if backend in matplotlib.rcsetup.interactive_bk:
