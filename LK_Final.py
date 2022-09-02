@@ -13,6 +13,7 @@ import numpy as np
 import cv2 as cv
 import argparse
 import imutils
+import matplotlib
 import matplotlib.pyplot as plt
 import pickle
 from scipy import stats
@@ -23,10 +24,10 @@ Hei = 540
 "window height"
 TP_NUM = 20             
 "maximum tracking points at the same time"
-VP_NUM = 15
-"number of recent cross points references to update the best VP per round"
+VP_REF_NUM = 15
+"number of recent cross points references to update the VP per round"
 VP_UPDATE_RATE = 0.5
-"update rate to the best VP"
+"update rate to the VP"
 FL_UPDATE_RATE = 0.05
 "update rate for calculating average length of flow lines"
 TP_UPDATE_RATE = 0.3
@@ -36,7 +37,7 @@ TP_UPDATE_TIME = 10
 MIN_ANG_DIF = 25
 "(degree) max acceptable angle difference of 2 lines to construct cross pt"
 MAX_CP_STD = 1.0
-"max acceptable standard deviation range of new cross points (distance between cross point and best VP)"
+"max acceptable standard deviation range of new cross points (distance between cross point and VP)"
 MIN_FL_LEN = 1.5
 "shortest acceptable length of flow lines"
 CP_THOLD = 1/15
@@ -56,7 +57,17 @@ def setup():
     """Setup global variables"""
     global cap, feature_params, lk_params, color, video_name
 
-    plt.figure(figsize=(12, 8), dpi=80)
+    # matplotlib.use("Qt5agg") # or "Qt5agg" depending on you version of Qt
+    fig = plt.figure(figsize=(12, 8), dpi=80)
+    plt.title(f"Recent {VP_REF} Points")
+    plt.gca().invert_yaxis()
+    plt.axis('scaled')
+    plt.xlim(WID//3*1, WID//3*2)
+    plt.ylim(Hei//3, Hei//4*3)
+    plt.ylabel("y axis")
+    plt.xlabel("x axis")
+    plt.show(block=False)
+
     np.set_printoptions(threshold=np.inf)
     parser = argparse.ArgumentParser(description='This sample demonstrates Lucas-Kanade Optical Flow calculation. \
                                                 The example file can be downloaded from: \
@@ -106,7 +117,7 @@ def angle_between(v1, v2):
 
     return angle
 
-class VP:
+class Point:
     """
     Vanishing Point/Cross Point Class
     =====
@@ -122,7 +133,7 @@ class VP:
     Methods
     -------
     is_init():
-        Check whether the point is initialized.
+        Check whether the point is initialized. (only for the vanishing point)
 
     has_moved():
         Check whether the point has moved.
@@ -133,11 +144,11 @@ class VP:
     update(x, y):
         Update the point with movement coordinate values.
 
-    check_valid(best):
+    check_valid(x, y):
         Check whether the new cross point is too far from the current vanishing point
     """
-    def __init__(self, isbest: bool, x=None, y=None) -> None:
-        self._isinit = not isbest
+    def __init__(self, isVP: bool, x=None, y=None) -> None:
+        self._isinit = not isVP
         self._moved = False
         self.x = x
         self.y = y
@@ -163,6 +174,7 @@ class VP:
         self._moved = True
         self.x = self.x + x * VP_UPDATE_RATE
         self.y = self.y + y * VP_UPDATE_RATE
+        print("VP updated")
 
     def is_init(self) -> bool:
         return self._isinit
@@ -170,9 +182,9 @@ class VP:
     def has_moved(self) -> bool:
         return self._moved
 
-    def check_valid(self, best) -> bool:
+    def check_valid(self, x, y) -> bool:
         """Check whether the new cross point is too far from the current vanishing point"""
-        return (np.absolute(self-best) < np.array([WID*CP_THOLD, Hei*CP_THOLD])).all()
+        return (np.abs(np.array([self.x-x, self.y-y])) < np.array([WID*CP_THOLD, Hei*CP_THOLD])).all()
 
 class VL:
     """
@@ -187,7 +199,7 @@ class VL:
     Methods
     -------
     update(vps: list, best_vp: VP):
-        Update the line pairs with a list of VP history and the current best vanishing point.
+        Update the line pairs with a list of VP history and the current vanishing point.
     """
     def __init__(self):
         self._isinit = False
@@ -201,8 +213,8 @@ class VL:
         else :
             return self._calculate_endpt()
 
-    def update(self, vps: list, best_vp: VP):
-        """Update the line pairs with a list of VP history and the current best vanishing point."""
+    def update(self, vps: list, best_vp: Point):
+        """Update the line pairs with a list of VP history and the current vanishing point."""
         if best_vp.has_moved():
             self._isinit = True
             self._bp = (best_vp.x, best_vp.y)
@@ -304,7 +316,7 @@ def cross_point(line1, line2):
     y = k1*x*1.0+b1*1.0
     return [x, y]
 
-def checkInside(pt, mask = [], st = []):
+def checkInside(pts, mask = [], st = []):
     """
         Brief
         ---
@@ -313,7 +325,7 @@ def checkInside(pt, mask = [], st = []):
         Parameters
         ---
         mask : array
-            A list coordinates of the boundary points.
+            A list of coordinates of the boundary points.
         st : array
             A list of current status.
 
@@ -322,11 +334,11 @@ def checkInside(pt, mask = [], st = []):
         isInside : boolean
     """
     status = []
-    for id in range(len(pt)):
-        if st[id,0] == 0 or floor(pt[id,0,1])>mask.shape[0] or floor(pt[id,0,0])>mask.shape[1] :
+    for id in range(len(pts)):
+        if st[id,0] == 0 or floor(pts[id,0,1])>mask.shape[0] or floor(pts[id,0,0])>mask.shape[1] :
             status.append([0])
         else:
-            status.append([mask[floor(pt[id,0,1]), floor(pt[id,0,0])] > 0])
+            status.append([mask[floor(pts[id,0,1]), floor(pts[id,0,0])] > 0])
     return np.array(status)
 
 def modify_contrast_and_brightness2(img, brightness=0 , contrast=100):
@@ -462,6 +474,7 @@ def Run():
 
     processed_old_frame = process_img(old_frame)
 
+    # Choose the points to track in the first round
     p0s = []
     for j in range(2):
         p0 = []
@@ -476,7 +489,7 @@ def Run():
     recent_cps, all_cps = [], []
     flow_lines = []
     vl = VL()
-    best_vp = VP(isbest=True)
+    vp = Point(isVP=True)
     prev_time = time.time()
     avg_len = [MIN_FL_LEN, MIN_FL_LEN]
 
@@ -486,40 +499,27 @@ def Run():
     draw_mask = np.zeros_like(old_frame)
 
     while(1):
-        print(avg_len)
         ret, frame = cap.read()
         if not ret:
             print('No frames grabbed!')
             cv.destroyAllWindows()
-            # exit()
             break
         
         frame = imutils.resize(frame, width=int(WID))
         processed_frame = process_img(frame)
 
-        """
-        # Bird's eye view
-        src = np.float32([[0, Hei*0.85], [WID, Hei*0.85], [WID//3, Hei*0.6], [WID//3*2, Hei*0.6]])
-        dst = np.float32([[WID*0.4, Hei], [WID*0.6, Hei], [0, 0], [WID, 0]])
-        Mx = cv.getPerspectiveTransform(src, dst) # The transformation matrix
-        Minv = cv.getPerspectiveTransform(dst, src) # Inverse transformation
-        warped_img = cv.warpPerspective(frame, Mx, (WID, Hei))
-        cv.imshow('Bird\'s Eye View', warped_img)
-
-        cur_frame = np.zeros_like(processed_frame)
-        """
         cur_lines_total = []
-        p0 = []
+        
         if len(p0s[0]) != 0 or len(p0s[1]) != 0:
-            for n, p0_ in enumerate(p0s):
-                if len(p0_) == 0:
+            for n, p0 in enumerate(p0s):
+                if len(p0) == 0:
                     continue
                 good_new = []
                 good_old = []
                 cur_lines = []
                 # calculate optical flow
                 p1, st, err = cv.calcOpticalFlowPyrLK(processed_old_frame, 
-                                processed_frame, p0_, None, **lk_params)
+                                processed_frame, p0, None, **lk_params)
                 
                 # Select good points
                 # Check if the line is still inside the mask
@@ -527,11 +527,11 @@ def Run():
                     filter = checkInside(p1, mask, st)
                     st[~filter] = 0
                     good_new.extend(p1[st==1])
-                    good_old.extend(p0_[st==1])
+                    good_old.extend(p0[st==1])
                 
                 good_new = np.array(good_new)
                 good_old = np.array(good_old)
-                p0s[n] = np.append(p0_, good_new.reshape(-1, 1, 2))
+                p0s[n] = good_new.reshape(-1, 1, 2)
                 
                 # Find The Flow Lines
                 for i, (new, old) in enumerate(zip(good_new, good_old)):
@@ -551,36 +551,32 @@ def Run():
                                     (int(c), int(d)), new_line.color.tolist(), 2)
                     frame = cv.circle(frame, (int(a), int(b)), 4, color[i].tolist(), -1)
                 cur_lines_total.extend(cur_lines)
-            p0 = np.array(p0)
             
             # Find the cross points from each pair of flow lines
-            for pair in itertools.combinations(cur_lines_total, 2):
-                l1, l2 = pair
+            for (l1, l2) in itertools.combinations(cur_lines_total, 2):
+                # l1, l2 = pair
                 angle_diff = abs(l1.angle - l2.angle)
-                if angle_diff > MIN_ANG_DIF and angle_diff < 360-MIN_ANG_DIF:
-                    x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
-                                        np.concatenate([l1.start, l1.stop]))
-                    if x is nan or y is nan:
-                        continue
-                    if y > l1.start[1] or y > l2.start[1]:
-                        # if the position of the cross point is lower than the flow line
-                        continue
-
-                    new_cp = VP(False, x, y)
+                if angle_diff < MIN_ANG_DIF or angle_diff > 360-MIN_ANG_DIF:
+                    # angle difference is too small
+                    continue
+                x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
+                                    np.concatenate([l1.start, l1.stop]))
+                if x is nan or y is nan or y > l1.start[1] or y > l2.start[1]:
+                    # if the position of the cross point is lower than the flow line
+                    continue
+                if not vp.is_init() or vp.check_valid(x, y):
+                    # store the cross point
+                    new_cp = Point(isVP=False, x=x, y=y)
                     recent_cps.append(new_cp)
                     all_cps.append(new_cp)
 
-                    # if the best vanishing point is found
-                    if best_vp.is_init():
-                        if not new_cp.check_valid(best_vp):
-                            recent_cps.pop()
-                            all_cps.pop()
-                            del new_cp
-                            continue
+                    # if the VP is found
+                    if vp.is_init():
+                        # culculate VP update direction
                         sum = np.array([0., 0.])
                         dif = []
-                        for vp in recent_cps[-VP_NUM:]:
-                            dif.append(vp - best_vp)
+                        for vp in recent_cps[-VP_REF_NUM:]:
+                            dif.append(vp - vp)
 
                         mean = np.mean(dif, axis=0)
                         std = np.std(dif, axis=0)
@@ -591,47 +587,45 @@ def Run():
                                 sum = sum + d
                                 c = c+1
                                 
-                        # update the best VP with movement
+                        # update the VP with movement
                         if c != 0:
                             sum = sum/c
-                            best_vp.update(sum[0], sum[1])
-                            vp_history_xy.append((best_vp.x, best_vp.y))
-                            all_vp.append(deepcopy(best_vp))
+                            vp.update(sum[0], sum[1])
+                            vp_history_xy.append((vp.x, vp.y))
+                            all_vp.append(deepcopy(vp))
                             vp_ult = 0
 
                     # initialize VP
-                    elif (len(recent_cps) >= VP_NUM):
+                    elif (len(recent_cps) >= VP_REF_NUM):
                         sum = np.array([0., 0.])
                         for vp in recent_cps:
                             sum = sum + np.array([vp.x, vp.y])
-                        sum = sum/VP_NUM
-                        best_vp.set(sum[0], sum[1])
+                        sum = sum/VP_REF_NUM
+                        vp.set(sum[0], sum[1])
                         vp_ult = 0
 
-                    else:
-                        print("# of recent cross point:", len(recent_cps))
-            
-            # VP updated long time ago
-            if best_vp.is_init() and vp_ult > HIDE_VP_THOLD :
-                best_vp = VP(True)
-                recent_cps = []
-                print("hide")
 
-        # show the best VP (Green)
-        if best_vp.is_init():
-            vp_history_xy.append((best_vp.x, best_vp.y))
-            all_vp.append(deepcopy(best_vp))
-            vl.update(all_vp[-VP_REF:], best_vp)
-            if SHOW_VL > 0:
-                lp, rp, up, dp, st = vl()
-                if st:
-                    frame = cv.line(frame, (int(lp[0]), int(lp[1])), (int(rp[0]), int(rp[1])), [0, 200, 50], 2)
-                    frame = cv.line(frame, (int(up[0]), int(up[1])), (int(dp[0]), int(dp[1])), [0, 200, 50], 2)
-            frame = cv.circle(frame, (int(best_vp.x), int(best_vp.y)), 6, [0, 255, 100], -1)
-            all_lines_frame = cv.circle(all_lines_frame, 
-                                (int(best_vp.x), int(best_vp.y)), 2, [0, 255, 100], -1)
-            
-            plot_vp(all_vp, all_cps, best_vp, vl)
+        # show the VP (Green)
+        if vp.is_init():
+            if vp_ult > HIDE_VP_THOLD :
+            # VP updated long time ago
+                vp = Point(isVP=True)
+                recent_cps = []
+                print("vp hide")
+            else:
+                vp_history_xy.append((vp.x, vp.y))
+                all_vp.append(deepcopy(vp))
+                vl.update(all_vp[-VP_REF:], vp)
+                if SHOW_VL > 0:
+                    lp, rp, up, dp, st = vl()
+                    if st:
+                        frame = cv.line(frame, (int(lp[0]), int(lp[1])), (int(rp[0]), int(rp[1])), [0, 200, 50], 2)
+                        frame = cv.line(frame, (int(up[0]), int(up[1])), (int(dp[0]), int(dp[1])), [0, 200, 50], 2)
+                frame = cv.circle(frame, (int(vp.x), int(vp.y)), 6, [0, 255, 100], -1)
+                all_lines_frame = cv.circle(all_lines_frame, 
+                                    (int(vp.x), int(vp.y)), 2, [0, 255, 100], -1)
+                
+                plot_vp(all_vp, all_cps, vp, vl)
         
         if WRITE_VIDEO:
             out.write(cv.add(frame, draw_mask))
@@ -664,7 +658,7 @@ def Run():
         processed_old_frame = processed_frame.copy()
         
         # when # tracking points is not enough
-        if len(p0) < TP_NUM*TP_UPDATE_RATE or tp_ult == TP_UPDATE_TIME:
+        if (len(p0s[0]) + len(p0s[1])) < TP_NUM*TP_UPDATE_RATE or tp_ult == TP_UPDATE_TIME:
             tp_ult = 0
             new = []
 
@@ -716,22 +710,30 @@ def data_statistic():
     plt.axis('scaled')
     plt.show()
 
+def mypause(interval):
+    backend = plt.rcParams['backend']
+    if backend in matplotlib.rcsetup.interactive_bk:
+        figManager = matplotlib._pylab_helpers.Gcf.get_active()
+        if figManager is not None:
+            canvas = figManager.canvas
+            if canvas.figure.stale:
+                canvas.draw()
+            canvas.start_event_loop(interval)
+            return
+
 def plot_vp(vps, cps, best_vp, vl):
-    """Plot the best VP, vanishing line, VP history and recent cross points."""
+    """Plot the VP, vanishing line, VP history and recent cross points."""
     x = [row.x for row in vps[-VP_REF:]]
     y = [row.y for row in vps[-VP_REF:]]
 
     x_c = [row.x for row in cps[-VP_REF:]]
     y_c = [row.y for row in cps[-VP_REF:]]
 
-    plt.clf()
-    plt.title(f"Recent {VP_REF} Points")
+    # plt.cla()
+    plt.gca().clear()
+    plt.gca().invert_yaxis()
     plt.xlim(WID//3*1, WID//3*2)
     plt.ylim(Hei//3, Hei//4*3)
-    plt.gca().invert_yaxis()
-    plt.axis('scaled')
-    plt.ylabel("y axis")
-    plt.xlabel("x axis")
     plt.scatter(WID/2, Hei/2, 100, 'r')
     plt.scatter(x_c, y_c, 10, 'y')
     plt.scatter(x, y, 20, 'b')
@@ -741,8 +743,8 @@ def plot_vp(vps, cps, best_vp, vl):
         if st:
             plt.plot([lp[0], rp[0]], [lp[1], rp[1]])
             plt.plot([up[0], dp[0]], [up[1], dp[1]])
-    plt.legend(["center", "cross points", "vps", "best point", "vanishing line"])
-    plt.pause(0.001)
+    plt.legend(["center", "cross points", "VPs history", "VP", "vanishing line"])
+    mypause(0.01)
 
 if __name__ == '__main__':
     setup()
