@@ -450,6 +450,16 @@ def Run():
         innerD= int(Hei*0.65),
     )
 
+
+    # bounds = dict(
+    #     outerL= int(WID*0.1),
+    #     outerR= int(WID*0.9),
+    #     outerD= int(Hei*0.9),
+    #     innerL= int(WID*0.3),
+    #     innerU= int(Hei*0.5),
+    #     innerR= int(WID*0.7),
+    # )
+
     mask_points = np.array([[ WID//2,                                   (bounds["outerD"]+bounds["innerU"])//2],    #中間 [0]
                             [ bounds["outerL"],                          bounds["outerD"]],                         #左下 [1]
                             [ WID//2,                                    bounds["outerD"]],                         #中下 [2]
@@ -575,6 +585,8 @@ def Run():
                 #           by 2 lines with enough angle difference
                 if angle_diff < MIN_ANG_DIF or angle_diff > 360-MIN_ANG_DIF:
                     continue
+                if abs(l1.start[0] - l2.start[0]) < WID*0.05:
+                    continue
                 x, y = cross_point(np.concatenate([l2.start, l2.stop]), 
                                     np.concatenate([l1.start, l1.stop]))
 
@@ -632,6 +644,7 @@ def Run():
             if vp_ult > HIDE_VP_THOLD :
                 vp = Point(isVP=True)
                 recent_cps = []
+                avg_len = [MIN_FL_LEN, MIN_FL_LEN]
                 print("vp hide")
 
             # Step 8-2: Draw on the frame and plot the data otherwise
@@ -678,6 +691,8 @@ def Run():
         elif k == 32:
             while (cv.waitKey(0) & 0xff != 32):
                 continue
+        elif k == 8:
+            draw_mask = np.zeros_like(old_frame)
 
         
         # Step 9: If there are not enough tracking points, REPlace current points by the new points
